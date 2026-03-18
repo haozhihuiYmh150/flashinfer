@@ -1278,7 +1278,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
     }
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-      prob_vec[j] = (pred(prob_vec[j]) ? prob_vec[j] : 0) / q;
+      probs_vec[j] = (pred(probs_vec[j]) ? probs_vec[j] : 0) / q;
     }
     if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
       probs_vec.cast_store(filtered_probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
