@@ -308,10 +308,10 @@ def get_sampling_module():
             maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        filtered_prob = torch.empty_like(probs)
         module.top_k_top_p_filter_return_probs.default(
             probs,
-            samples,
+            filtered_prob,
             indices,
             maybe_top_k_arr,
             top_k_val,
@@ -320,7 +320,7 @@ def get_sampling_module():
             deterministic,
             generator,
         )
-        return samples
+        return filtered_prob
 
     @register_fake_op("flashinfer::top_k_top_p_sampling_from_probs")
     def _fake_top_k_top_p_sampling_from_probs(

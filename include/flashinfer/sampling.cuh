@@ -1132,22 +1132,6 @@ __global__ void MinPSamplingFromProbKernel(DType* probs, float* min_p_arr, IdTyp
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
           typename DType, typename IdType>
-__global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
-                                               IdType* output, IdType* indices, IdType top_k_val,
-                                               float top_p_val, uint32_t d, uint64_t philox_seed,
-                                               uint64_t philox_offset) {
-  auto device_kernel = GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, 
-                            VEC_SIZE, DETERMINISTIC, DType, IdType>;
-  device_kernel(probs, filtered_probs, top_k_arr, top_p_arr,
-                output, indices, top_k_val,
-                top_p_val, d, philox_seed,
-                philox_offset,
-                d);
-}
-
-template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
-          BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
-          typename DType, typename IdType>
 __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
                                                IdType* output, IdType* indices, IdType top_k_val,
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
@@ -1300,6 +1284,22 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       probs_vec.cast_store(filtered_probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
     }
   }
+}
+
+template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
+          typename DType, typename IdType>
+__global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
+                                               IdType* output, IdType* indices, IdType top_k_val,
+                                               float top_p_val, uint32_t d, uint64_t philox_seed,
+                                               uint64_t philox_offset) {
+  auto device_kernel = GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, 
+                            VEC_SIZE, DETERMINISTIC, DType, IdType>;
+  device_kernel(probs, filtered_probs, top_k_arr, top_p_arr,
+                output, indices, top_k_val,
+                top_p_val, d, philox_seed,
+                philox_offset,
+                d);
 }
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
