@@ -1167,13 +1167,11 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
         probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
       }
       for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        probs_vec[j] = {
-            (probs_vec[j] > low && probs_vec[j] <= high) ? 1 : 0,
-            (probs_vec[j] > low && probs_vec[j] <= high && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+        probs_vec[j] = (probs_vec[j] > low && probs_vec[j] <= high) ? 1 : 0;
       }
       DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
                              DETERMINISTIC>(
-          i, d, [&](float x) { return x > low; }, u, probs_vec, aggregate, &temp_storage);
+          i, d, [&](float x) { return true; }, u, probs_vec, aggregate, &temp_storage);
       if (aggregate > u) {
         break;
       }
