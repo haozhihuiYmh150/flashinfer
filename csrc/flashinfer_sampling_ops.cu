@@ -48,6 +48,12 @@ void top_k_top_p_sampling_from_probs(at::Tensor probs, at::Tensor output,
                                      std::optional<at::Tensor> maybe_top_p_arr, double top_p_val,
                                      bool deterministic, std::optional<at::Generator> gen);
 
+void top_k_top_p_filter_return_probs(at::Tensor probs, at::Tensor filtered_probs,
+                                     std::optional<at::Tensor> maybe_indices,
+                                     std::optional<at::Tensor> maybe_top_k_arr, double top_k_val,
+                                     std::optional<at::Tensor> maybe_top_p_arr, double top_p_val,
+                                     bool deterministic, std::optional<at::Generator> gen);
+
 void top_p_renorm_probs(at::Tensor probs, at::Tensor renorm_probs,
                         std::optional<at::Tensor> maybe_top_p_arr, double top_p_val);
 
@@ -78,6 +84,8 @@ TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   m.def("top_p_sampling_from_probs", top_p_sampling_from_probs);
   // Top-k and top-p sampling from probabilities
   m.def("top_k_top_p_sampling_from_probs", top_k_top_p_sampling_from_probs);
+  // Return Top-k and top-p filtered probabilities
+  m.def("top_k_top_p_filter_return_probs", top_k_top_p_filter_return_probs);
   // Renormalize probabilities by top-k mask
   m.def("top_k_renorm_probs", top_k_renorm_probs);
   // Renormalize probabilities by top-p mask
