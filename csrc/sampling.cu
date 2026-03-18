@@ -246,6 +246,7 @@ void top_k_top_p_filter_return_probs(at::Tensor probs, at::Tensor filtered_probs
   CHECK_EQ(filtered_probs.device(), device);
   CHECK_DIM(2, probs);   // probs: (batch_size, vocab_size)
   CHECK_DIM(2, filtered_probs);  // filtered_probs: (batch_size, vocab_size)
+  unsigned int batch_size = filtered_probs.size(0);
   unsigned int vocab_size = filtered_probs.size(1);
   bool has_top_k_arr = maybe_top_k_arr.has_value();
   bool has_top_p_arr = maybe_top_p_arr.has_value();
