@@ -61,10 +61,10 @@ using namespace cub;
 
 #define DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, ...) \
   if (compute_capacity.first >= 8) {                                           \
-    uint32_t BLOCK_THREADS = 1024;                                   \
+    constexpr uint32_t BLOCK_THREADS = 1024;                                   \
     __VA_ARGS__                                                                \
   } else {                                                                     \
-    uint32_t BLOCK_THREADS = 512;                                    \
+    constexpr uint32_t BLOCK_THREADS = 512;                                    \
     __VA_ARGS__                                                                \
   }
 
@@ -1721,25 +1721,24 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, I
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
-  DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
-    BLOCK_THREADS = 128;
-    const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
-    dim3 nblks(batch_size);
-    dim3 nthrs(BLOCK_THREADS);
-    void* args[] = {&probs,     &filtered_probs,  &top_k_arr, &top_p_arr,      &indices,
-                    &top_k_val, &top_p_val,       &d,         &philox_seed,     &philox_offset};
 
-    DISPATCH_ALIGNED_VEC_SIZE(
-        vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                       VEC_SIZE, DETERMINISTIC, T, IdType>;
-          FLASHINFER_CUDA_CALL(
-              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-          FLASHINFER_CUDA_CALL(
-              cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
-        })});
-    return cudaSuccess;
-  });
+  constexpr uint32_t BLOCK_THREADS = 128;
+  const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
+  dim3 nblks(batch_size);
+  dim3 nthrs(BLOCK_THREADS);
+  void* args[] = {&probs,     &filtered_probs,  &top_k_arr, &top_p_arr,      &indices,
+                  &top_k_val, &top_p_val,       &d,         &philox_seed,     &philox_offset};
+
+  DISPATCH_ALIGNED_VEC_SIZE(
+      vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+        auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType>;
+        FLASHINFER_CUDA_CALL(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        FLASHINFER_CUDA_CALL(
+            cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
+      })});
+  return cudaSuccess;
 }
 
 template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM>
