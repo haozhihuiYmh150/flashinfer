@@ -1297,7 +1297,7 @@ __global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_prob
                 indices, top_k_val,
                 top_p_val, d, philox_seed,
                 philox_offset,
-                d);
+                float(d));
 }
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
