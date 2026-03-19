@@ -28,6 +28,8 @@
 #include <limits>
 #include <numeric>
 #include <tuple>
+#include <typeinfo>
+#include <iostream>
 
 #include "allocator.h"
 #include "math.cuh"
@@ -1293,11 +1295,15 @@ __global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_prob
                                                uint64_t philox_offset) {
   auto device_kernel = GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, 
                             VEC_SIZE, DETERMINISTIC, DType, IdType>;
-  device_kernel(probs, filtered_probs, top_k_arr, top_p_arr,
+  std::cout << "device " << typeid(decltype(device_kernel)).name() << std::endl;
+  std::cout << "GetTopKTopPFilteredProbDevice template " << typeid(decltype(GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, VEC_SIZE, DETERMINISTIC, DType, IdType>)).name() << std::endl;
+
+  GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, 
+                            VEC_SIZE, DETERMINISTIC, DType, IdType>(probs, filtered_probs, top_k_arr, top_p_arr,
                 indices, top_k_val,
                 top_p_val, d, philox_seed,
                 philox_offset,
-                float(d), 0, 1);
+                d, 0, 1);
 }
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
