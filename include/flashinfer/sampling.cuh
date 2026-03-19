@@ -28,8 +28,6 @@
 #include <limits>
 #include <numeric>
 #include <tuple>
-#include <typeinfo>
-#include <iostream>
 
 #include "allocator.h"
 #include "math.cuh"
@@ -1266,7 +1264,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       q = aggregate_gt_pivot.count-aggregate_gt_high.count;
     }
     if (tx == 0){
-      std::cout << "tx " << tx << ", " << low << ", " << high << std::endl;
+      printf("tx %d low %d high %d", tx, low, high);
     }
   } while (true);
   __syncthreads();
