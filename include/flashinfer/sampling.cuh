@@ -61,10 +61,10 @@ using namespace cub;
 
 #define DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, ...) \
   if (compute_capacity.first >= 8) {                                           \
-    constexpr uint32_t BLOCK_THREADS = 1024;                                   \
+    uint32_t BLOCK_THREADS = 1024;                                   \
     __VA_ARGS__                                                                \
   } else {                                                                     \
-    constexpr uint32_t BLOCK_THREADS = 512;                                    \
+    uint32_t BLOCK_THREADS = 512;                                    \
     __VA_ARGS__                                                                \
   }
 
