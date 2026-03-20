@@ -1247,20 +1247,18 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       __syncthreads();
       aggregate_gt_high = temp_storage.block_aggregate.pair;
     }
-
-    if ((aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p && aggregate_lt_pivot.value <= (1-p))
+    if (tx == 0){
+      printf(
+        "bx=%d,low=%e,high=%e,q=%f,gt_pivot.count=%d,gt_pivot.value=%e,lt_pivot.count=%d,lt_pivot.value=%e,gt_low.count=%d,gt_high.count=%d,pivot_id=%d,pivot=%f,n_iter=%d,\n", 
+        bx, low, high, q,
+        aggregate_gt_pivot.count, aggregate_gt_pivot.value, aggregate_lt_pivot.count, aggregate_lt_pivot.value, aggregate_gt_low.count, aggregate_gt_high.count, pivot_id, pivot, n_iter
+      );
+    }
+    if ((aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p && aggregate_lt_pivot.value <= (1-p) && aggregate_lt_pivot.count <= (d-k))
         || q == 1) {
       // case 1: pivot is the boundary
       q = d-aggregate_lt_pivot.count;
       break;
-    }
-    ++n_iter;
-    if (tx == 0){
-      printf(
-        "bx=%d low=%e high=%e q=%d, gt_pivot.count=%d, gt_pivot.value=%e, lt_pivot.count=%d, lt_pivot.value=%e, gt_low.count=%d, gt_high.count=%d, pivot_id=%d, pivot=%f, n_iter=%d, \n", 
-        bx, low, high, q,
-        aggregate_gt_pivot.count, aggregate_gt_pivot.value, aggregate_lt_pivot.count, aggregate_lt_pivot.value, aggregate_gt_low.count, aggregate_gt_high.count, pivot_id, pivot, n_iter
-      );
     }
     if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
       // case 2: The boundary is on the left side of pivot
@@ -1271,7 +1269,8 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       low = pivot;
       q = aggregate_gt_pivot.count-aggregate_gt_high.count;
     }
-  } while (n_iter <= n_max_iter);
+    ++n_iter;
+  } while (n_iter < n_max_iter);
   __syncthreads();
   // return all p | p >= pivot
   auto p_bound = probs[row_idx * d + pivot_id];
