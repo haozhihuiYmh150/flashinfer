@@ -1726,7 +1726,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, I
 
   auto compute_capacity = GetCudaComputeCapability();
 
-  constexpr uint32_t BLOCK_THREADS = 128;
+  constexpr uint32_t BLOCK_THREADS = 1024;
   const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
   dim3 nblks(batch_size);
   dim3 nthrs(BLOCK_THREADS);
