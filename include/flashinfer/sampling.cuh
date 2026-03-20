@@ -1155,6 +1155,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   vec_t<float, VEC_SIZE> probs_vec;
   float aggregate;
   int pivot_id;
+  int dg_n = 20;
   do {
     temp_storage.sampled_id = d;
     __syncthreads();
@@ -1264,9 +1265,10 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       q = aggregate_gt_pivot.count-aggregate_gt_high.count;
     }
     if (tx == 0){
-      printf("bx=%d tx=%d low=%f high=%f q=%f \n", bx, tx, low, high, q);
+      printf("bx=%d tx=%d low=%e high=%e q=%e low>=high=%d\n", bx, tx, low, high, q, low>=high);
     }
-  } while (true);
+    --dg_n;
+  } while (dg_n>=0);
   __syncthreads();
   // return all p | p >= pivot
   auto p_bound = probs[row_idx * d + pivot_id];
