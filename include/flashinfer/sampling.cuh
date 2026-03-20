@@ -1264,7 +1264,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       q = aggregate_gt_pivot.count-aggregate_gt_high.count;
     }
     if (tx == 0){
-      printf("tx %d low %d high %d", tx, low, high);
+      printf("bx=%d tx=%d low=%f high=%f q=%f \n", bx, tx, low, high, q);
     }
   } while (true);
   __syncthreads();
