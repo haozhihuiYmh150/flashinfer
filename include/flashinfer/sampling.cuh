@@ -1254,7 +1254,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
         aggregate_gt_pivot.count, aggregate_gt_pivot.value, aggregate_lt_pivot.count, aggregate_lt_pivot.value, aggregate_gt_low.count, aggregate_gt_high.count, pivot_id, pivot, n_iter
       );
     }
-    if ((aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p && aggregate_lt_pivot.value <= (1-p) && aggregate_lt_pivot.count <= (d-k))
+    if (((aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) && (aggregate_lt_pivot.value <= (1-p) || aggregate_lt_pivot.count <= (d-k)))
         || q == 1) {
       // case 1: pivot is the boundary
       q = d-aggregate_lt_pivot.count;
