@@ -308,7 +308,7 @@ def get_sampling_module():
             maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        filtered_prob = torch.empty_like(probs)
+        filtered_prob = torch.zeros_like(probs)
         module.top_k_top_p_filter_return_probs.default(
             probs,
             filtered_prob,

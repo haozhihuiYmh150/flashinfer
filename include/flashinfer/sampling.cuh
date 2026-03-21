@@ -1136,11 +1136,9 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
                                                IdType* indices, IdType top_k_val,
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
                                                uint64_t philox_offset, 
-                                               float q) {
+                                               double low = 0, double high = 1) {
   const uint32_t batch_size = gridDim.x;
   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
-  curandStatePhilox4_32_10_t state;
-  curand_init(philox_seed, bx, philox_offset, &state);
   const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
   const uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
   const float p = top_p_arr == nullptr ? top_p_val : top_p_arr[row_idx];
@@ -1153,70 +1151,30 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
           smem_sampling);
 
   vec_t<float, VEC_SIZE> probs_vec;
-  float aggregate;
-  int pivot_id;
-  double pivot = 0;
-  double low = 0, double high = 1.f;
-  int n_max_iter = 30, n_iter = 0;
+  double pivot;
+  int n_iter = 0;
   int gt_low_count = d, gt_high_count = 0;
   do {
-    temp_storage.sampled_id = d;
-    __syncthreads();
-    float u = curand_uniform(&state) * q;
-    aggregate = 0;
+    if (gt_low_count-gt_high_count <= 1) {
+      // case 1: high is the boundary
+      break;
+    }
+    pivot = (low + high) / 2;
+
+    ValueCount<float> aggregate_gt_pivot{0, 0};
 #pragma unroll 2
     for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
       probs_vec.fill(0);
       if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
         probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
       }
-      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        probs_vec[j] = (probs_vec[j] > low && probs_vec[j] <= high) ? 1 : 0;
-      }
-      DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
-                             DETERMINISTIC>(
-          i, d, [&](float x) { return true; }, u, probs_vec, aggregate, &temp_storage);
-      if (aggregate > u) {
-        break;
-      }
-    }
-    __syncthreads();
-    pivot_id = temp_storage.sampled_id;
-    if (pivot_id == d) {
-      // NOTE(Zihao): this would happen when u is very close to 1
-      // and the sum of probabilities is smaller than u
-      // In this case, we use the last valid index as the sampled id
-      pivot_id = temp_storage.last_valid_id;
-    }
-    pivot = probs[row_idx * d + pivot_id];
-
-    ValueCount<float> aggregate_lt_pivot{0, 0}, aggregate_gt_pivot{0, 0};
-#pragma unroll 2
-    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-      probs_vec.fill(0);
-      if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-        probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
-      }
-
-      ValueCount<float> probs_lt_pivot[VEC_SIZE], probs_gt_pivot[VEC_SIZE], probs_gt_high[VEC_SIZE];
+      ValueCount<float> probs_gt_pivot[VEC_SIZE];
 #pragma unroll
       for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        probs_lt_pivot[j] = {
-            (probs_vec[j] < pivot) ? probs_vec[j] : 0,
-            (probs_vec[j] < pivot && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
         probs_gt_pivot[j] = {
             (probs_vec[j] > pivot) ? probs_vec[j] : 0,
             (probs_vec[j] > pivot && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
       }
-      aggregate_lt_pivot +=
-          BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
-              .Sum<VEC_SIZE>(probs_lt_pivot);
-      if (tx == 0) {
-        temp_storage.block_aggregate.pair = aggregate_lt_pivot;
-      }
-      __syncthreads();
-      aggregate_lt_pivot = temp_storage.block_aggregate.pair;
-
       aggregate_gt_pivot +=
           BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
               .Sum<VEC_SIZE>(probs_gt_pivot);
@@ -1226,36 +1184,28 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       __syncthreads();
       aggregate_gt_pivot = temp_storage.block_aggregate.pair;
     }
-    // if (tx == 0){
-    //   printf(
-    //     "bx=%d,low=%e,high=%e,q=%f,gt_pivot.count=%d,gt_pivot.value=%e,lt_pivot.count=%d,lt_pivot.value=%e,gt_low.count=%d,gt_high.count=%d,pivot_id=%d,pivot=%f,n_iter=%d,\n", 
-    //     bx, low, high, q,
-    //     aggregate_gt_pivot.count, aggregate_gt_pivot.value, aggregate_lt_pivot.count, aggregate_lt_pivot.value, aggregate_gt_low.count, aggregate_gt_high.count, pivot_id, pivot, n_iter
-    //   );
-    // }
-    if (((aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) && (aggregate_lt_pivot.value <= (1-p) || aggregate_lt_pivot.count <= (d-k)))
-        || q == 1) {
-      // case 1: pivot is the boundary
-      q = d-aggregate_lt_pivot.count;
-      break;
+    /*
+    if (tx == 0){
+      printf(
+        "bx=%d,low=%e,high=%e,gt_pivot.count=%d,gt_pivot.value=%e,gt_low.count=%d,gt_high.count=%d,pivot=%f,n_iter=%d,\n", 
+        bx, low, high, aggregate_gt_pivot.count, aggregate_gt_pivot.value, gt_low_count, gt_high_count, pivot, n_iter
+      );
     }
+    */
     if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
-      // case 2: The boundary is on the left side of pivot
+      // case 4
       high = pivot;
       gt_high_count = aggregate_gt_pivot.count;
-      q = gt_low_count - aggregate_gt_pivot.count;
     } else {
-      // case 3: The boundary is on the right side of pivot
+      // case 4
       low = pivot;
       gt_low_count = aggregate_gt_pivot.count;
-      q = aggregate_gt_pivot.count - gt_high_count;
     }
     ++n_iter;
-  } while (n_iter < n_max_iter);
+  } while (low < high);
   __syncthreads();
-  // return all p | p >= pivot
-  auto p_bound = probs[row_idx * d + pivot_id];
-  auto pred = [&](float x) { return x >= p_bound; };
+  // return filtered p
+  auto pred = [&](float x) { return x >= high; };
 #pragma unroll 2
   for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
     probs_vec.fill(0);
@@ -1264,7 +1214,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
     }
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-      probs_vec[j] = (pred(probs_vec[j]) ? probs_vec[j] : 0) / q;
+      probs_vec[j] = pred(probs_vec[j]) ? probs_vec[j] : 0;
     }
     if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
       probs_vec.cast_store(filtered_probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
@@ -1284,7 +1234,7 @@ __global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_prob
       (probs, filtered_probs, top_k_arr, top_p_arr,
       indices, top_k_val,
       top_p_val, d, philox_seed,
-      philox_offset, d);
+      philox_offset);
 }
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
@@ -1706,24 +1656,24 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, I
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
+  DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
+        const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
+        dim3 nblks(batch_size);
+        dim3 nthrs(BLOCK_THREADS);
+        void* args[] = {&probs,     &filtered_probs,  &top_k_arr, &top_p_arr,      &indices,
+                        &top_k_val, &top_p_val,       &d,         &philox_seed,     &philox_offset};
 
-  constexpr uint32_t BLOCK_THREADS = 512;
-  const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
-  dim3 nblks(batch_size);
-  dim3 nthrs(BLOCK_THREADS);
-  void* args[] = {&probs,     &filtered_probs,  &top_k_arr, &top_p_arr,      &indices,
-                  &top_k_val, &top_p_val,       &d,         &philox_seed,     &philox_offset};
-
-  DISPATCH_ALIGNED_VEC_SIZE(
-      vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-        auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                      VEC_SIZE, DETERMINISTIC, T, IdType>;
-        FLASHINFER_CUDA_CALL(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-        FLASHINFER_CUDA_CALL(
-            cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
-      })});
-  return cudaSuccess;
+        DISPATCH_ALIGNED_VEC_SIZE(
+            vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+              auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                            VEC_SIZE, DETERMINISTIC, T, IdType>;
+              FLASHINFER_CUDA_CALL(
+                  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+              FLASHINFER_CUDA_CALL(
+                  cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
+            })});
+        return cudaSuccess;
+  });
 }
 
 template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM>
