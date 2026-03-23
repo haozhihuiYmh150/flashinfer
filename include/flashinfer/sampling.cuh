@@ -1159,7 +1159,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   int n_iter = 0;
   int gt_low_count = d, gt_high_count = 0;
   do {
-    if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-5) {
+    if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-4) {
       break;
     }
     pivot = low + (clusterBlockRank+1) * (high-low) / (cluster_size+1);
@@ -1731,7 +1731,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                       indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
               } else {
                 constexpr uint32_t BLOCK_THREADS = 512;
-                constexpr int cluster_size = 4;
+                constexpr int cluster_size = 8;
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                               VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
                 cudaLaunchAttribute attribute[1];
