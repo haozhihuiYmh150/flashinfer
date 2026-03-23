@@ -264,7 +264,7 @@ void top_k_top_p_filter_return_probs(at::Tensor probs, at::Tensor filtered_probs
       static_cast<float*>(probs.data_ptr()),
       has_top_k_arr ? static_cast<int*>(maybe_top_k_arr->data_ptr()) : nullptr,
       has_top_p_arr ? static_cast<float*>(maybe_top_p_arr->data_ptr()) : nullptr,
-      static_cast<int*>(filtered_probs.data_ptr()),
+      static_cast<float*>(filtered_probs.data_ptr()),
       maybe_indices.has_value() ? static_cast<int*>(maybe_indices->data_ptr()) : nullptr,
       batch_size, top_k_val, top_p_val, vocab_size, deterministic, philox_seed, philox_offset,
       stream);
