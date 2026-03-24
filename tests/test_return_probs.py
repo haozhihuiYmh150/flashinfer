@@ -3,7 +3,10 @@ import time
 from flashinfer.sampling import top_k_top_p_sampling_from_probs
 from flashinfer.sampling import top_k_top_p_filter_return_probs
 import numpy as np
-
+"""
+export CUDA_VISIBLE_DEVICES=1
+python -m pip install --no-build-isolation -e . -v
+"""
 def golden_impl(prob, topk, topp):
     batch_size, vocab_size = prob.shape
     device = prob.device
