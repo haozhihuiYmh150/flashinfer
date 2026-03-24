@@ -230,7 +230,7 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     print(f'{diff_golden=}')
 
 if __name__ == "__main__":
-    torch.set_printoptions(threshold=float('inf'))
+    torch.set_printoptions(threshold=float('inf'), precision=6)
     # test_top_k_top_p_sampling_performance(1)
     # test_top_k_top_p_sampling_performance(16)
     # test_top_k_top_p_sampling_performance(32)
