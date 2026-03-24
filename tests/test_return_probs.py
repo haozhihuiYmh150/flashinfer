@@ -4,7 +4,7 @@ from flashinfer.sampling import top_k_top_p_sampling_from_probs
 from flashinfer.sampling import top_k_top_p_filter_return_probs
 import numpy as np
 """
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=7
 python -m pip install --no-build-isolation -e . -v
 """
 def golden_impl(prob, topk, topp):
@@ -119,7 +119,6 @@ def test_case(func_name, func, num_warmup, num_runs, *args, **kwargs):
     for i in range(num_warmup):
         func(*args, **kwargs)
     torch.cuda.synchronize()
-    print(f'{func_name=} warmup over')
     times_func = []
     for i in range(num_runs):
         torch.cuda.synchronize()
@@ -140,23 +139,17 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     print(50*"#")
 
     # 测试配置
-    vocab_size = 151936  # 典型的LLM词表大小
-    # vocab_size = 128  # 典型的LLM词表大小
+    vocab_size = 151936  # LLM词表大小
     num_runs = 400  # 运行多次取平均
+    top_k_value = 1024
+    top_p_value = 0.98
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    print(f"\n使用设备: {device}")
-    
     # 准备测试数据 - 放在cuda上
     # 使用尖峰分布
     probs = generate_llm_like_prob(batch_size, vocab_size, distribution="spike", spike_ratio=0.2, spike_mass=0.7, device=device)
     # 低温分布（尖锐）
     # probs = generate_llm_like_prob(batch_size, vocab_size, distribution="temperature", temperature=0.5, device=device)
-
-    # 所有batch使用相同的top-k和top-p值
-    top_k_value = 1024
-    top_p_value = 0.98
-
     # 创建相同的top-k和top-p tensor（所有batch相同）
     top_ks = torch.full((batch_size,), top_k_value, dtype=torch.long, device=device)
     top_ps = torch.full((batch_size,), top_p_value, dtype=torch.float32, device=device)
@@ -186,13 +179,12 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     )
     
     # 打印性能结果
-    print(f"性能测试结果 (batch_size={batch_size}, vocab_size={vocab_size}, ")
-    print(f"采样参数: top_k={top_k_value}, top_p={top_p_value} (所有batch相同)")
+    print(f"性能对比 (函数2 vs 函数1): {case1_ret[1]/case2_ret[1]:.2f}x")
+    print(f"(batch_size={batch_size}, vocab_size={vocab_size}, top_k={top_k_value}, top_p={top_p_value}")
     info_str = (f"函数1 - {case1_ret[0]}: 平均时间: {case1_ret[1]:.3f} ms")
     print(info_str)
     info_str = (f"函数2 - {case2_ret[0]}: 平均时间: {case2_ret[1]:.3f} ms")
     print(info_str)
-    print(f"性能对比 (函数2 vs 函数1): {case1_ret[1]/case2_ret[1]:.2f}x")
 
 if __name__ == "__main__":
     test_top_k_top_p_sampling_performance(1)
