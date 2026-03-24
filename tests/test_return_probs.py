@@ -1,12 +1,14 @@
+"""
+export CUDA_VISIBLE_DEVICES=7
+python -m pip install --no-build-isolation -e . -v
+"""
+
 import torch
 import time
 from flashinfer.sampling import top_k_top_p_sampling_from_probs
 from flashinfer.sampling import top_k_top_p_filter_return_probs
 import numpy as np
-"""
-export CUDA_VISIBLE_DEVICES=7
-python -m pip install --no-build-isolation -e . -v
-"""
+
 def golden_impl(prob, topk, topp):
     batch_size, vocab_size = prob.shape
     device = prob.device
@@ -140,7 +142,7 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     print(50*"#")
 
     # 测试配置
-    vocab_size = 151936  # LLM词表大小
+    vocab_size = 2048  # LLM词表大小
     num_runs = 400  # 运行多次取平均
     top_k_value = 1024
     top_p_value = 0.98
@@ -224,6 +226,8 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     mask = my_ret != gloden_ret
     diff_my = my_ret[mask]
     diff_golden = gloden_ret[mask]
+
+    torch.set_printoptions(threshold=float('inf'))
 
     print(f'{diff_my=}')
     print(f'{diff_golden=}')
