@@ -1159,7 +1159,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   int n_iter = 0;
   int gt_low_count = d, gt_high_count = 0;
   do {
-    if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-4) {
+    if (gt_low_count-gt_high_count <= 1) {
       break;
     }
     double step = (high-low) / (cluster_size+1);
