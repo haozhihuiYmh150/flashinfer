@@ -2,6 +2,7 @@ import torch
 import time
 from flashinfer.sampling import top_k_top_p_sampling_from_probs
 from flashinfer.sampling import top_k_top_p_filter_return_probs
+import numpy as np
 
 def golden_impl(prob, topk, topp):
     batch_size, vocab_size = prob.shape
@@ -36,9 +37,6 @@ def golden_impl(prob, topk, topp):
         # 将原概率值赋给输出
         filtered[i, keep_indices] = prob[i, keep_indices]
     return filtered
-
-import torch
-import numpy as np
 
 def generate_llm_like_prob(
     batch_size: int,
@@ -111,7 +109,7 @@ def generate_llm_like_prob(
     else:
         raise ValueError("distribution 必须是 'power_law', 'spike' 或 'temperature'")
 
-def test_case(func_name, func, num_warmup, *args, **kwargs):
+def test_case(func_name, func, num_warmup, num_runs, *args, **kwargs):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 
@@ -120,7 +118,7 @@ def test_case(func_name, func, num_warmup, *args, **kwargs):
     torch.cuda.synchronize()
     print(f'{func_name=} warmup over')
     times_func = []
-    for i in range(400):
+    for i in range(num_runs):
         torch.cuda.synchronize()
         start_time = time.time()
         ret = func(*args, **kwargs)
@@ -164,6 +162,7 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
         "top_k_top_p_filter_return_probs", 
         top_k_top_p_filter_return_probs, 
         10,
+        400,
         probs.contiguous(),
         top_ks,
         top_ps,
@@ -175,6 +174,7 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
         "top_k_top_p_sampling_from_probs", 
         top_k_top_p_sampling_from_probs, 
         10,
+        400,
         probs.contiguous(),
         top_ks,
         top_ps,
