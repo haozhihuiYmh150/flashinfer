@@ -1366,6 +1366,10 @@ __global__ void TopKTopPSamplingFromProbKernel(DType* probs, IdType* top_k_arr, 
       __syncthreads();
       aggregate_gt_pivot_1 = temp_storage.block_aggregate.pair;
     }
+    ++n_iter;
+    if(tx == 0){
+      printf("n_iter=%d, \n", n_iter);
+    }
     if (aggregate_gt_pivot_0.count < k && aggregate_gt_pivot_0.value < p) {
       // case 1: pivot_0 accepted
       break;
@@ -1379,10 +1383,6 @@ __global__ void TopKTopPSamplingFromProbKernel(DType* probs, IdType* top_k_arr, 
       // case 3: pivot_0 rejected, pivot_1 rejected
       low = pivot_1;
       q = aggregate_gt_pivot_1.value;
-    }
-    ++n_iter;
-    if(tx == 0){
-      printf("n_iter=%d, \n", n_iter);
     }
   } while (low < high);
   __syncthreads();

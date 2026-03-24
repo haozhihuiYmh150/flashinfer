@@ -219,8 +219,14 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
         top_ks,
         top_ps,
     )
-
     print(f'{torch.equal(my_ret, gloden_ret)=}')
+
+    mask = my_ret != gloden_ret
+    diff_my = my_ret[mask]
+    diff_golden = gloden_ret[mask]
+
+    print(f'{diff_my=}')
+    print(f'{diff_golden=}')
 
 if __name__ == "__main__":
     # test_top_k_top_p_sampling_performance(1)
