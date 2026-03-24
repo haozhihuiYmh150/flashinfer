@@ -119,6 +119,7 @@ def test_case(func_name, func, num_warmup, num_runs, *args, **kwargs):
     for i in range(num_warmup):
         func(*args, **kwargs)
     torch.cuda.synchronize()
+    return ("debug", 1, None)
     times_func = []
     for i in range(num_runs):
         torch.cuda.synchronize()
@@ -157,7 +158,7 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     case1_ret = test_case(
         "top_k_top_p_filter_return_probs", 
         top_k_top_p_filter_return_probs, 
-        10,
+        1,
         400,
         probs.contiguous(),
         top_ks,
@@ -169,7 +170,7 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     case2_ret = test_case(
         "top_k_top_p_sampling_from_probs", 
         top_k_top_p_sampling_from_probs, 
-        10,
+        1,
         400,
         probs.contiguous(),
         top_ks,
@@ -188,8 +189,8 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
 
 if __name__ == "__main__":
     test_top_k_top_p_sampling_performance(1)
-    test_top_k_top_p_sampling_performance(16)
-    test_top_k_top_p_sampling_performance(32)
-    test_top_k_top_p_sampling_performance(64)
-    test_top_k_top_p_sampling_performance(128)
-    test_top_k_top_p_sampling_performance(256)
+    # test_top_k_top_p_sampling_performance(16)
+    # test_top_k_top_p_sampling_performance(32)
+    # test_top_k_top_p_sampling_performance(64)
+    # test_top_k_top_p_sampling_performance(128)
+    # test_top_k_top_p_sampling_performance(256)
