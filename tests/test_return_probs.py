@@ -194,7 +194,6 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
 
     # 测试配置
     vocab_size = 151936  # LLM词表大小
-    num_runs = 400  # 运行多次取平均
     top_k_value = 1024
     top_p_value = 0.98
 
