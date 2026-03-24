@@ -226,13 +226,11 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     mask = my_ret != gloden_ret
     diff_my = my_ret[mask]
     diff_golden = gloden_ret[mask]
-
-    torch.set_printoptions(threshold=float('inf'))
-
     print(f'{diff_my=}')
     print(f'{diff_golden=}')
 
 if __name__ == "__main__":
+    torch.set_printoptions(threshold=float('inf'))
     # test_top_k_top_p_sampling_performance(1)
     # test_top_k_top_p_sampling_performance(16)
     # test_top_k_top_p_sampling_performance(32)
