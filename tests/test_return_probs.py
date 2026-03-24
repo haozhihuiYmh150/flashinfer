@@ -120,7 +120,7 @@ def test_case(func_name, func, num_warmup, *args, **kwargs):
     torch.cuda.synchronize()
     print(f'{func_name=} warmup over')
     times_func = []
-    for i in range(num_runs):
+    for i in range(400):
         torch.cuda.synchronize()
         start_time = time.time()
         ret = func(*args, **kwargs)
