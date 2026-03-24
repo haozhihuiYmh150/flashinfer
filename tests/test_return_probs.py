@@ -187,10 +187,47 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     info_str = (f"函数2 - {case2_ret[0]}: 平均时间: {case2_ret[1]:.3f} ms")
     print(info_str)
 
+def test_top_k_top_p_sampling_acc(batch_size=1):
+    print(50*"#")
+
+    # 测试配置
+    vocab_size = 151936  # LLM词表大小
+    num_runs = 400  # 运行多次取平均
+    top_k_value = 1024
+    top_p_value = 0.98
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 准备测试数据 - 放在cuda上
+    # 使用尖峰分布
+    probs = generate_llm_like_prob(batch_size, vocab_size, distribution="spike", spike_ratio=0.2, spike_mass=0.7, device=device)
+    # 低温分布（尖锐）
+    # probs = generate_llm_like_prob(batch_size, vocab_size, distribution="temperature", temperature=0.5, device=device)
+    # 创建相同的top-k和top-p tensor（所有batch相同）
+    top_ks = torch.full((batch_size,), top_k_value, dtype=torch.long, device=device)
+    top_ps = torch.full((batch_size,), top_p_value, dtype=torch.float32, device=device)
+
+    my_ret = top_k_top_p_filter_return_probs(
+        probs.contiguous(),
+        top_ks,
+        top_ps,
+        filter_apply_order="joint",
+        check_nan=False,
+    )
+
+    gloden_ret = golden_impl(
+        probs.contiguous(),
+        top_ks,
+        top_ps,
+    )
+
+    print(f'{torch.equal(my_ret, gloden_ret)=}')
+
 if __name__ == "__main__":
-    test_top_k_top_p_sampling_performance(1)
+    # test_top_k_top_p_sampling_performance(1)
     # test_top_k_top_p_sampling_performance(16)
     # test_top_k_top_p_sampling_performance(32)
     # test_top_k_top_p_sampling_performance(64)
     # test_top_k_top_p_sampling_performance(128)
     # test_top_k_top_p_sampling_performance(256)
+
+    test_top_k_top_p_sampling_acc(1)
