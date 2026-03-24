@@ -1198,7 +1198,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
             high = pivot;
             gt_high_count = aggregate_gt_pivot.count;
             break;
-          } else if (i == (cluster_size-1)) {
+          } else {
             low = pivot;
             gt_low_count = aggregate_gt_pivot.count;
           }
