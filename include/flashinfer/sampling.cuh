@@ -1191,9 +1191,10 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
     if (cluster_size > 1){
       cluster.sync();
       if (clusterBlockRank == 0){
+        double old_low = low;
         for(int i = 0; i < cluster_size; ++i){
           aggregate_gt_pivot = *cluster.map_shared_rank(&temp_storage.block_aggregate.pair, i);
-          pivot = low + (i+1) * step;
+          pivot = old_low + (i+1) * step;
           if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
             high = pivot;
             gt_high_count = aggregate_gt_pivot.count;
