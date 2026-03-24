@@ -1162,7 +1162,8 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
     if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-4) {
       break;
     }
-    pivot = low + (clusterBlockRank+1) * (high-low) / (cluster_size+1);
+    double step = (high-low) / (cluster_size+1);
+    pivot = low + (clusterBlockRank+1) * step;
 
     ValueCount<float> aggregate_gt_pivot{0, 0};
 #pragma unroll 2
@@ -1192,6 +1193,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       if (clusterBlockRank == 0){
         for(int i = 0; i < cluster_size; ++i){
           aggregate_gt_pivot = *cluster.map_shared_rank(&temp_storage.block_aggregate.pair, i);
+          pivot = low + (i+1) * step;
           if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
             high = pivot;
             gt_high_count = aggregate_gt_pivot.count;
