@@ -207,18 +207,18 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     top_ks = torch.full((batch_size,), top_k_value, dtype=torch.long, device=device)
     top_ps = torch.full((batch_size,), top_p_value, dtype=torch.float32, device=device)
 
+    gloden_ret = golden_impl(
+        probs.contiguous(),
+        top_ks,
+        top_ps,
+    )
+
     my_ret = top_k_top_p_filter_return_probs(
         probs.contiguous(),
         top_ks,
         top_ps,
         filter_apply_order="joint",
         check_nan=False,
-    )
-
-    gloden_ret = golden_impl(
-        probs.contiguous(),
-        top_ks,
-        top_ps,
     )
     print(f'{torch.equal(my_ret, gloden_ret)=}')
 
@@ -229,12 +229,12 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     print(f'{diff_golden=}')
 
 if __name__ == "__main__":
-    # torch.set_printoptions(threshold=float('inf'), precision=6)
-    # test_top_k_top_p_sampling_acc(1)
+    torch.set_printoptions(threshold=float('inf'), precision=6)
+    test_top_k_top_p_sampling_acc(1)
 
-    test_top_k_top_p_sampling_performance(1)
-    test_top_k_top_p_sampling_performance(16)
-    test_top_k_top_p_sampling_performance(32)
-    test_top_k_top_p_sampling_performance(64)
-    test_top_k_top_p_sampling_performance(128)
-    test_top_k_top_p_sampling_performance(256)
+    # test_top_k_top_p_sampling_performance(1)
+    # test_top_k_top_p_sampling_performance(16)
+    # test_top_k_top_p_sampling_performance(32)
+    # test_top_k_top_p_sampling_performance(64)
+    # test_top_k_top_p_sampling_performance(128)
+    # test_top_k_top_p_sampling_performance(256)
