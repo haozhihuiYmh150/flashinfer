@@ -28,7 +28,7 @@ def golden_impl(prob, topk, topp):
 
         # 当前样本的前 k_i 个概率值（已降序）
         vals_i = values[i, :k_i]           # (k_i,)
-        print(f'{i=}, {k_i=}, {values[i, -1]=}, ')
+        # print(f'{i=}, {k_i=}, {values[i, -1]=}, ')
         cumsum = torch.cumsum(vals_i, dim=0)   # 累积和
 
         # 找到满足累积和 < p_i 的最大索引（至少保留一个）
@@ -234,5 +234,8 @@ if __name__ == "__main__":
     # test_top_k_top_p_sampling_acc(16)
     # test_top_k_top_p_sampling_acc(32)
     # test_top_k_top_p_sampling_acc(128)
-    for i in range(256):
-        test_top_k_top_p_sampling_performance(i+1)
+
+    # test_top_k_top_p_sampling_performance(1)
+    # for i in range(16):
+    #     test_top_k_top_p_sampling_performance((i+1)*16)
+    test_top_k_top_p_sampling_performance(160)
