@@ -1702,32 +1702,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
         // const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>) + sizeof(float) + 2*sizeof(double);
         DISPATCH_ALIGNED_VEC_SIZE(
             vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-              if (batch_size == 160){
-                constexpr uint32_t BLOCK_THREADS = 512;
-                constexpr int cluster_size = 2;
-                auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
-                cudaLaunchAttribute attribute[1];
-                attribute[0].id = cudaLaunchAttributeClusterDimension;
-                attribute[0].val.clusterDim.x = cluster_size;
-                attribute[0].val.clusterDim.y = 1;
-                attribute[0].val.clusterDim.z = 1;
-
-                cudaLaunchConfig_t config = {0};
-                config.gridDim = batch_size * cluster_size;
-                config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
-                config.stream = stream;
-                config.numAttrs = 1;
-                config.attrs = attribute;
-
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                FLASHINFER_CUDA_CALL(
-                    cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr, 
-                      indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
-              } else if (batch_size > 16){
+              if (batch_size > 16){
                 constexpr uint32_t BLOCK_THREADS = 1024;
                 constexpr int cluster_size = 1;
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
