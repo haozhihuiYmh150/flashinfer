@@ -1233,7 +1233,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       break;
     }else{
       if(tx == 0){
-        printf("clusterBlockRank=%d, low=%e, high=%e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%e, \n", 
+        printf("clusterBlockRank=%d, low=%.32e, high=%.32e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%.32e, \n", 
           clusterBlockRank, low, high, gt_low_count, gt_high_count, n_iter, (high-low) / (cluster_size+1)
         );
       }
