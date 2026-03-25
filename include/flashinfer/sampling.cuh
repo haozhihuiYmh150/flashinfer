@@ -1159,7 +1159,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   int n_iter = 0;
   int gt_low_count = d, gt_high_count = 0;
   do {
-    if (gt_low_count-gt_high_count <= 1) {
+    if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-7) {
       break;
     }
     double step = (high-low) / (cluster_size+1);
@@ -1229,15 +1229,15 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       }
     }
     ++n_iter;
-    if(n_iter > 1000){
-      break;
-    }else{
-      if(tx == 0){
-        printf("clusterBlockRank=%d, low=%.32e, high=%.32e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%.32e, \n", 
-          clusterBlockRank, low, high, gt_low_count, gt_high_count, n_iter, (high-low) / (cluster_size+1)
-        );
-      }
-    }
+    // if(n_iter > 1000){
+    //   break;
+    // }else{
+    //   if(tx == 0){
+    //     printf("clusterBlockRank=%d, low=%.32e, high=%.32e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%.32e, \n", 
+    //       clusterBlockRank, low, high, gt_low_count, gt_high_count, n_iter, (high-low) / (cluster_size+1)
+    //     );
+    //   }
+    // }
   } while (low < high);
   if (clusterBlockRank != 0) return;
   __syncthreads();
