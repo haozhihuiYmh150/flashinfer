@@ -142,7 +142,7 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     print(50*"#")
 
     # 测试配置
-    vocab_size = 2048  # LLM词表大小
+    vocab_size = 151936  # LLM词表大小
     num_runs = 400  # 运行多次取平均
     top_k_value = 1024
     top_p_value = 0.98
@@ -192,15 +192,11 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
 def test_top_k_top_p_sampling_acc(batch_size=1):
     print(50*"#")
 
-    # # 测试配置
-    # vocab_size = 151936  # LLM词表大小
-    # top_k_value = 1024
-    # top_p_value = 0.98
     # 测试配置
-    vocab_size = 2048  # LLM词表大小
-    num_runs = 400  # 运行多次取平均
+    vocab_size = 151936  # LLM词表大小
     top_k_value = 1024
     top_p_value = 0.98
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # 准备测试数据 - 放在cuda上
     # 使用尖峰分布
@@ -233,12 +229,12 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     print(f'{diff_golden=}')
 
 if __name__ == "__main__":
-    torch.set_printoptions(threshold=float('inf'), precision=32)
-    test_top_k_top_p_sampling_acc(1)
+    # torch.set_printoptions(threshold=float('inf'), precision=32)
+    # test_top_k_top_p_sampling_acc(1)
 
-    # test_top_k_top_p_sampling_performance(1)
-    # test_top_k_top_p_sampling_performance(16)
-    # test_top_k_top_p_sampling_performance(32)
-    # test_top_k_top_p_sampling_performance(64)
-    # test_top_k_top_p_sampling_performance(128)
-    # test_top_k_top_p_sampling_performance(256)
+    test_top_k_top_p_sampling_performance(1)
+    test_top_k_top_p_sampling_performance(16)
+    test_top_k_top_p_sampling_performance(32)
+    test_top_k_top_p_sampling_performance(64)
+    test_top_k_top_p_sampling_performance(128)
+    test_top_k_top_p_sampling_performance(256)
