@@ -28,7 +28,7 @@ def golden_impl(prob, topk, topp):
 
         # 当前样本的前 k_i 个概率值（已降序）
         vals_i = values[i, :k_i]           # (k_i,)
-        # print(f'{i=}, {k_i=}, {values[i, -1]=}, ')
+        print(f'{i=}, {k_i=}, {values[i, -1]=}, ')
         cumsum = torch.cumsum(vals_i, dim=0)   # 累积和
 
         # 找到满足累积和 < p_i 的最大索引（至少保留一个）
@@ -182,12 +182,10 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     )
     
     # 打印性能结果
-    print(f"性能对比 (函数2 vs 函数1): {case1_ret[1]/case2_ret[1]:.2f}x")
-    print(f"(batch_size={batch_size}, vocab_size={vocab_size}, top_k={top_k_value}, top_p={top_p_value}")
-    info_str = (f"函数1 - {case1_ret[0]}: 平均时间: {case1_ret[1]:.3f} ms")
-    print(info_str)
-    info_str = (f"函数2 - {case2_ret[0]}: 平均时间: {case2_ret[1]:.3f} ms")
-    print(info_str)
+    print(f"perf (func2 vs func1): {case1_ret[1]/case2_ret[1]:.2f}x")
+    print(f" (batch_size={batch_size}, vocab_size={vocab_size}, top_k={top_k_value}, top_p={top_p_value}, )")
+    print(f" func1 - {case1_ret[0]}: avg: {case1_ret[1]:.3f} ms\n"
+        f" func2 - {case2_ret[0]}: avg: {case2_ret[1]:.3f} ms")
 
 def test_top_k_top_p_sampling_acc(batch_size=1):
     print(50*"#")
@@ -234,8 +232,8 @@ if __name__ == "__main__":
     # test_top_k_top_p_sampling_acc(16)
     # test_top_k_top_p_sampling_acc(32)
     # test_top_k_top_p_sampling_acc(128)
+    # test_top_k_top_p_sampling_acc(160)
 
-    # test_top_k_top_p_sampling_performance(1)
-    # for i in range(16):
-    #     test_top_k_top_p_sampling_performance((i+1)*16)
-    test_top_k_top_p_sampling_performance(160)
+    test_top_k_top_p_sampling_performance(1)
+    for i in range(16):
+        test_top_k_top_p_sampling_performance((i+1)*16)
