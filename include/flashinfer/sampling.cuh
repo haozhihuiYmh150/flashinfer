@@ -1141,7 +1141,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
                                                uint64_t philox_offset, 
                                                double low = 0, double high = 1) {
-  __syncthreads(); if (threadIdx.x == 0) { printf("makr %d, \n", 0); }
+  __syncthreads(); if (threadIdx.x == 0) { printf("mark %d, \n", 0); }
   namespace cg = cooperative_groups;
   namespace ptx = cuda::ptx;
   auto cluster = cg::this_cluster();
@@ -1803,7 +1803,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
         // const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>) + sizeof(float) + 2*sizeof(double);
         DISPATCH_ALIGNED_VEC_SIZE(
             vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-              constexpr uint32_t BLOCK_THREADS = 512;
+              constexpr uint32_t BLOCK_THREADS = 256;
               constexpr int num_stages = 2;
               const uint32_t smem_size = num_stages * BLOCK_THREADS * vec_size * sizeof(float);
               if (batch_size > 16){
