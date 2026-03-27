@@ -31,6 +31,7 @@
 #include <limits>
 #include <numeric>
 #include <tuple>
+#include <stdexcept>
 
 #include "allocator.h"
 #include "math.cuh"
@@ -1157,18 +1158,12 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   __shared__ float smem_gt_high_count;
   __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
 
-  // 1. Initialization Phase
   constexpr size_t block_size = BLOCK_THREADS * VEC_SIZE;
   __shared__ float smem_probs[num_stages * block_size];
   size_t smem_probs_offset[num_stages];
   bool use_tma[num_stages];
 
-#pragma unroll num_stages
-  for (int s = 0; s < num_stages; ++s) {
-    smem_probs_offset[s] = s * block_size;
-    use_tma[s] = true;
-  }
-  // return in offset
+  // return in memory offset
   auto block_batch = [&](size_t batch) -> int {
     return row_idx * d + batch * block_size;
   };
@@ -1194,44 +1189,48 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   double pivot;
   int n_iter = 0;
   int gt_low_count = d, gt_high_count = 0;
-  // Fill the pipeline with the first ``num_stages`` batches.
-  cg::invoke_one(block, [&]() {
-    size_t num_bytes = block_size * sizeof(float);
-    #pragma unroll num_stages
-    for (int s = 0; s < num_stages; ++s) {
-      tma_load(s, s, num_bytes);
-    }
-  });
 
-  bool prob_vec_loaded = false;
   do {
     if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-7) {
       break;
     }
-    prob_vec_loaded = true;
     double step = (high-low) / (cluster_size+1);
     pivot = low + (clusterBlockRank+1) * step;
 
     ValueCount<float> aggregate_gt_pivot{0, 0};
     size_t batch_size = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
 
+    // 1. Initialization Phase
+    #pragma unroll num_stages
+    for (int s = 0; s < num_stages; ++s) {
+      smem_probs_offset[s] = s * block_size;
+      use_tma[s] = true;
+    }
+    // Fill the pipeline with the first ``num_stages`` batches.
+    cg::invoke_one(block, [&]() {
+      size_t num_bytes = block_size * sizeof(float);
+      #pragma unroll num_stages
+      for (int s = 0; s < num_stages; ++s) {
+        tma_load(s, s, num_bytes);
+      }
+    });
     // 2. Main Processing Loop.
     // compute_batch: next batch to process.
     // fetch_batch:   next batch to fetch from global memory.
     int stage = 0;       // current stage in the shared memory buffer.
     uint32_t parity = 0; // barrierparity
-#pragma unroll 2
+    #pragma unroll 2
     for (size_t compute_batch = 0, fetch_batch = num_stages; compute_batch < batch_size; ++compute_batch, ++fetch_batch) {
       // (a) Wait on current batch.
       if (use_tma[stage]){
         while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta, cuda::device::barrier_native_handle(bar[stage]), parity)) {}
-#pragma unroll
+        #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; ++j) {
           probs_vec[j] = smem_probs[smem_probs_offset[stage] + j * BLOCK_THREADS + tx];
         }
         use_tma[stage] = false;
       } else {
-#pragma unroll
+        #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; ++j) {probs_vec[j] = 0;} // clear probs_vec
         for (uint32_t j = 0; j < VEC_SIZE; ++j) {
           if (compute_batch * block_size + j * BLOCK_THREADS + tx < d){
@@ -1242,7 +1241,8 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
 
       // (b) Compute on the current batch.
       ValueCount<float> probs_gt_pivot[VEC_SIZE];
-#pragma unroll
+
+      #pragma unroll
       for (uint32_t j = 0; j < VEC_SIZE; ++j) {
         probs_gt_pivot[j] = {
             (probs_vec[j] > pivot) ? probs_vec[j] : 0,
@@ -1318,11 +1318,11 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       }
     }
     ++n_iter;
-    // if(n_iter > 1000){
+    // if(n_iter > 30){
     //   break;
     // }else{
     //   if(tx == 0){
-    //     printf("clusterBlockRank=%d, low=%.32e, high=%.32e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%.32e, \n", 
+    //     printf("clusterBlockRank=%d, low=%.8e, high=%.8e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%.8e, \n", 
     //       clusterBlockRank, low, high, gt_low_count, gt_high_count, n_iter, (high-low) / (cluster_size+1)
     //     );
     //   }
@@ -1332,24 +1332,22 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   __syncthreads();
   // return filtered p
   auto pred = [&](float x) { return x >= high; };
-#pragma unroll 2
-  for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-    if (!prob_vec_loaded) {
-  #pragma unroll
-      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        if (i * block_size + j * BLOCK_THREADS + tx < d){
-          probs_vec[j] = probs[row_idx * d + i * block_size + j * BLOCK_THREADS + tx];
-        }
+  #pragma unroll 2
+  for (uint32_t i = 0; i < ceil_div(d, block_size); ++i) {
+    #pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+      if (i * block_size + j * BLOCK_THREADS + tx < d){
+        probs_vec[j] = probs[row_idx * d + i * block_size + j * BLOCK_THREADS + tx];
       }
     }
-#pragma unroll
+    #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
       probs_vec[j] = pred(probs_vec[j]) ? probs_vec[j] : 0;
     }
-#pragma unroll
+    #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
       if (i * block_size + j * BLOCK_THREADS + tx < d){
-        probs[row_idx * d + i * block_size + j * BLOCK_THREADS + tx] = probs_vec[j];
+        filtered_probs[row_idx * d + i * block_size + j * BLOCK_THREADS + tx] = probs_vec[j];
       }
     }
   }
@@ -1792,15 +1790,15 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                                      uint64_t philox_seed, uint64_t philox_offset,
                                      cudaStream_t stream = 0) {
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
-  printf("vec_size=%d, \n", vec_size);
+  if (!(vec_size * sizeof(T) >= 16)) { throw std::runtime_error("tma requires 16-byte alignment"); }
 
   auto compute_capacity = GetCudaComputeCapability();
   // DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
         // const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>) + sizeof(float) + 2*sizeof(double);
         DISPATCH_ALIGNED_VEC_SIZE(
             vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+              constexpr uint32_t BLOCK_THREADS = 320;
               if (batch_size > 16){
-                constexpr uint32_t BLOCK_THREADS = 256;
                 constexpr int cluster_size = 1;
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                               VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
@@ -1825,7 +1823,6 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                       probs, filtered_probs, top_k_arr, top_p_arr, 
                       indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
               } else {
-                constexpr uint32_t BLOCK_THREADS = 256;
                 constexpr int cluster_size = 8;
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                               VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
