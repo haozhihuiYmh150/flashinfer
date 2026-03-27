@@ -1141,6 +1141,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
                                                uint64_t philox_offset, 
                                                double low = 0, double high = 1) {
+  __syncthreads(); if (threadIdx.x == 0) { printf("makr %d, \n", 0); }
   namespace cg = cooperative_groups;
   namespace ptx = cuda::ptx;
   auto cluster = cg::this_cluster();
@@ -1159,7 +1160,9 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
 
   constexpr size_t block_size = BLOCK_THREADS * VEC_SIZE;
-  __shared__ float smem_probs[num_stages * block_size];
+  extern __shared__ __align__(16) float smem_probs[];
+  __syncthreads(); if (threadIdx.x == 0) { printf("makr %d, \n", 1); }
+
   size_t smem_probs_offset[num_stages];
   bool use_tma[num_stages];
 
@@ -1207,6 +1210,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       use_tma[s] = true;
     }
     // Fill the pipeline with the first ``num_stages`` batches.
+    __syncthreads(); if (threadIdx.x == 0) { printf("makr %d, \n", 2); }
     cg::invoke_one(block, [&]() {
       size_t num_bytes = block_size * sizeof(float);
       #pragma unroll num_stages
@@ -1214,6 +1218,8 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
         tma_load(s, s, num_bytes);
       }
     });
+    __syncthreads(); if (threadIdx.x == 0) { printf("makr %d, \n", 3); }
+
     // 2. Main Processing Loop.
     // compute_batch: next batch to process.
     // fetch_batch:   next batch to fetch from global memory.
@@ -1355,13 +1361,13 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
-          typename DType, typename IdType, int cluster_size=1>
+          typename DType, typename IdType, int cluster_size=1, int num_stages=2>
 __global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
                                                IdType* indices, IdType top_k_val,
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
                                                uint64_t philox_offset) {
   GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, 
-                            VEC_SIZE, DETERMINISTIC, DType, IdType, cluster_size>
+                            VEC_SIZE, DETERMINISTIC, DType, IdType, cluster_size, num_stages>
       (probs, filtered_probs, top_k_arr, top_p_arr,
       indices, top_k_val,
       top_p_val, d, philox_seed,
@@ -1797,11 +1803,13 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
         // const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>) + sizeof(float) + 2*sizeof(double);
         DISPATCH_ALIGNED_VEC_SIZE(
             vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-              constexpr uint32_t BLOCK_THREADS = 320;
+              constexpr uint32_t BLOCK_THREADS = 512;
+              constexpr int num_stages = 2;
+              const uint32_t smem_size = num_stages * BLOCK_THREADS * vec_size * sizeof(float);
               if (batch_size > 16){
                 constexpr int cluster_size = 1;
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
+                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, num_stages>;
                 cudaLaunchAttribute attribute[1];
                 attribute[0].id = cudaLaunchAttributeClusterDimension;
                 attribute[0].val.clusterDim.x = cluster_size;
@@ -1811,13 +1819,13 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                 cudaLaunchConfig_t config = {0};
                 config.gridDim = batch_size * cluster_size;
                 config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
+                config.dynamicSmemBytes = smem_size;
                 config.stream = stream;
                 config.numAttrs = 1;
                 config.attrs = attribute;
 
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                FLASHINFER_CUDA_CALL(
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 FLASHINFER_CUDA_CALL(
                     cudaLaunchKernelEx(&config, kernel,
                       probs, filtered_probs, top_k_arr, top_p_arr, 
@@ -1825,7 +1833,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
               } else {
                 constexpr int cluster_size = 8;
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
+                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, num_stages>;
                 cudaLaunchAttribute attribute[1];
                 attribute[0].id = cudaLaunchAttributeClusterDimension;
                 attribute[0].val.clusterDim.x = cluster_size;
@@ -1835,13 +1843,13 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                 cudaLaunchConfig_t config = {0};
                 config.gridDim = batch_size * cluster_size;
                 config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
+                config.dynamicSmemBytes = smem_size;
                 config.stream = stream;
                 config.numAttrs = 1;
                 config.attrs = attribute;
 
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                FLASHINFER_CUDA_CALL(
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 FLASHINFER_CUDA_CALL(
                     cudaLaunchKernelEx(&config, kernel,
                       probs, filtered_probs, top_k_arr, top_p_arr, 
