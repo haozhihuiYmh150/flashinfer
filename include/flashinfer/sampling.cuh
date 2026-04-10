@@ -1153,6 +1153,20 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   __shared__ float smem_gt_low_count;
   __shared__ float smem_gt_high_count;
   __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
+#define FLASHINFER_ENABLE_TIMING
+
+#ifdef FLASHINFER_ENABLE_TIMING
+  // Timing variables for profiling
+  __shared__ long long timing_load;
+  __shared__ long long timing_compute;
+  __shared__ long long timing_reduce;
+  if (tx == 0) {
+    timing_load = 0;
+    timing_compute = 0;
+    timing_reduce = 0;
+  }
+  __syncthreads();
+#endif
 
   vec_t<float, VEC_SIZE> probs_vec;
   double pivot;
@@ -1168,10 +1182,22 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
     ValueCount<float> aggregate_gt_pivot{0, 0};
 #pragma unroll 2
     for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+#ifdef FLASHINFER_ENABLE_TIMING
+      long long _t0 = clock64();
+#endif
+
+      // ===== Phase 1: Load =====
       probs_vec.fill(0);
       if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
         probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
       }
+
+#ifdef FLASHINFER_ENABLE_TIMING
+      __syncthreads();
+      long long _t1 = clock64();
+#endif
+
+      // ===== Phase 2: Compute probs_gt_pivot =====
       ValueCount<float> probs_gt_pivot[VEC_SIZE];
 #pragma unroll
       for (uint32_t j = 0; j < VEC_SIZE; ++j) {
@@ -1179,6 +1205,13 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
             (probs_vec[j] > pivot) ? probs_vec[j] : 0,
             (probs_vec[j] > pivot && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
       }
+
+#ifdef FLASHINFER_ENABLE_TIMING
+      __syncthreads();
+      long long _t2 = clock64();
+#endif
+
+      // ===== Phase 3: BlockReduce =====
       aggregate_gt_pivot +=
           BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
               .Sum<VEC_SIZE>(probs_gt_pivot);
@@ -1187,6 +1220,15 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       }
       __syncthreads();
       aggregate_gt_pivot = temp_storage.block_aggregate.pair;
+
+#ifdef FLASHINFER_ENABLE_TIMING
+      long long _t3 = clock64();
+      if (tx == 0) {
+        timing_load += (_t1 - _t0);
+        timing_compute += (_t2 - _t1);
+        timing_reduce += (_t3 - _t2);
+      }
+#endif
     }
     if (cluster_size > 1){
       cluster.sync();
@@ -1239,6 +1281,21 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
     //   }
     // }
   } while (low < high);
+
+#ifdef FLASHINFER_ENABLE_TIMING
+  // Print timing results (only block 0, thread 0)
+  if (blockIdx.x == 0 && tx == 0) {
+    long long total = timing_load + timing_compute + timing_reduce;
+    if (total > 0) {
+      printf("[FlashInfer Timing] Block 0, n_iter=%d, vocab_size=%u\n", n_iter, d);
+      printf("  Load:    %12lld cycles (%5.1f%%)\n", timing_load, 100.0 * timing_load / total);
+      printf("  Compute: %12lld cycles (%5.1f%%)\n", timing_compute, 100.0 * timing_compute / total);
+      printf("  Reduce:  %12lld cycles (%5.1f%%)\n", timing_reduce, 100.0 * timing_reduce / total);
+      printf("  Total:   %12lld cycles\n", total);
+    }
+  }
+#endif
+
   if (clusterBlockRank != 0) return;
   __syncthreads();
   // return filtered p
