@@ -1999,7 +1999,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
 
           // Debug: print resource usage
-          PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch>16)");
+          // PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch>16)");
 
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeClusterDimension;
@@ -2029,7 +2029,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
 
           // Debug: print resource usage
-          PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch<=16)");
+          // PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch<=16)");
 
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeClusterDimension;
