@@ -1153,7 +1153,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   __shared__ float smem_gt_low_count;
   __shared__ float smem_gt_high_count;
   __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
-#define FLASHINFER_ENABLE_TIMING
+// #define FLASHINFER_ENABLE_TIMING
 
 #ifdef FLASHINFER_ENABLE_TIMING
   // Timing variables for profiling
