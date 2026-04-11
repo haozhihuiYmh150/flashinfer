@@ -1132,11 +1132,11 @@ __global__ void MinPSamplingFromProbKernel(DType* probs, float* min_p_arr, IdTyp
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
-          typename DType, typename IdType, int cluster_size=1>
+          typename DType, typename IdType, int cluster_size=1, int PIVOTS_PER_BLOCK=4>
 __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
                                                IdType* indices, IdType top_k_val,
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
-                                               uint64_t philox_offset, 
+                                               uint64_t philox_offset,
                                                double low = 0, double high = 1) {
   namespace cg = cooperative_groups;
   auto cluster = cg::this_cluster();
@@ -1153,7 +1153,11 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   __shared__ float smem_gt_low_count;
   __shared__ float smem_gt_high_count;
   __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
-#define FLASHINFER_ENABLE_TIMING
+
+  // Shared memory for multi-pivot aggregates (used when cluster_size > 1)
+  __shared__ ValueCount<float> smem_pivot_aggregates[PIVOTS_PER_BLOCK];
+
+// #define FLASHINFER_ENABLE_TIMING
 
 #ifdef FLASHINFER_ENABLE_TIMING
   // Timing variables for profiling
@@ -1187,94 +1191,132 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   double pivot;
   int n_iter = 0;
   int gt_low_count = d, gt_high_count = 0;
-  do {
-    if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-7) {
-      break;
-    }
-    double step = (high-low) / (cluster_size+1);
-    pivot = low + (clusterBlockRank+1) * step;
 
-    ValueCount<float> aggregate_gt_pivot{0, 0};
-#pragma unroll 2
-    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+  // =====================================================================
+  // Optimized path for cluster_size > 1: each block reads 1/cluster_size
+  // of vocab and computes PIVOTS_PER_BLOCK pivots, then aggregates via DSM
+  // =====================================================================
+  if constexpr (cluster_size > 1) {
+    // Calculate this block's chunk of the vocab
+    const uint32_t chunk_size = ceil_div(d, (uint32_t)cluster_size);
+    const uint32_t my_start = clusterBlockRank * chunk_size;
+    const uint32_t my_end = min(my_start + chunk_size, d);
+    const uint32_t my_chunk_elems = (my_start < d) ? (my_end - my_start) : 0;
+
+    do {
+      if (gt_low_count - gt_high_count <= 1 || (high - low) < 1e-7) {
+        break;
+      }
+
+      // Compute PIVOTS_PER_BLOCK pivot values
+      double step = (high - low) / (PIVOTS_PER_BLOCK + 1);
+      double pivots[PIVOTS_PER_BLOCK];
+      #pragma unroll
+      for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+        pivots[pv] = low + (pv + 1) * step;
+      }
+
+      // Each block computes partial aggregates for all PIVOTS_PER_BLOCK pivots
+      ValueCount<float> partial_aggregates[PIVOTS_PER_BLOCK];
+      #pragma unroll
+      for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+        partial_aggregates[pv] = {0, 0};
+      }
+
 #ifdef FLASHINFER_ENABLE_TIMING
       __syncthreads();
       long long _t0 = clock64();
 #endif
 
-      // ===== Phase 1: Load =====
-      probs_vec.fill(0);
-      if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-        probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+      // Load and compute for this block's chunk only
+      #pragma unroll 2
+      for (uint32_t i = 0; i < ceil_div(my_chunk_elems, BLOCK_THREADS * VEC_SIZE); ++i) {
+        const uint32_t local_offset = (i * BLOCK_THREADS + tx) * VEC_SIZE;
+        const uint32_t global_idx = my_start + local_offset;
+
+        // ===== Phase 1: Load =====
+        probs_vec.fill(0);
+        if (global_idx < my_end && local_offset < my_chunk_elems) {
+          probs_vec.cast_load(probs + row_idx * d + global_idx);
+        }
+
+        // ===== Phase 2: Compute for all pivots =====
+        #pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+          ValueCount<float> probs_gt_pivot[VEC_SIZE];
+          #pragma unroll
+          for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+            bool valid = (global_idx + j < my_end) && (local_offset + j < my_chunk_elems);
+            probs_gt_pivot[j] = {
+                (probs_vec[j] > pivots[pv]) ? probs_vec[j] : 0,
+                (probs_vec[j] > pivots[pv] && valid)};
+          }
+
+          // ===== Phase 3: BlockReduce for this pivot =====
+          ValueCount<float> block_sum =
+              BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
+                  .Sum<VEC_SIZE>(probs_gt_pivot);
+
+          if (tx == 0) {
+            partial_aggregates[pv] += block_sum;
+          }
+          __syncthreads();
+        }
       }
 
 #ifdef FLASHINFER_ENABLE_TIMING
-      // Force data to actually arrive by touching it (prevent load-use latency hiding)
-      #pragma unroll
-      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        asm volatile("" : "+f"(probs_vec[j]));
-      }
-      __syncthreads();
       long long _t1 = clock64();
-#endif
-
-      // ===== Phase 2: Compute probs_gt_pivot =====
-      ValueCount<float> probs_gt_pivot[VEC_SIZE];
-#pragma unroll
-      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        probs_gt_pivot[j] = {
-            (probs_vec[j] > pivot) ? probs_vec[j] : 0,
-            (probs_vec[j] > pivot && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
-      }
-
-#ifdef FLASHINFER_ENABLE_TIMING
-      __syncthreads();
-      long long _t2 = clock64();
-#endif
-
-      // ===== Phase 3: BlockReduce =====
-      aggregate_gt_pivot +=
-          BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
-              .Sum<VEC_SIZE>(probs_gt_pivot);
-      if (tx == 0) {
-        temp_storage.block_aggregate.pair = aggregate_gt_pivot;
-      }
-      __syncthreads();
-      aggregate_gt_pivot = temp_storage.block_aggregate.pair;
-
-#ifdef FLASHINFER_ENABLE_TIMING
-      long long _t3 = clock64();
       if (tx == 0) {
         timing_load += (_t1 - _t0);
-        timing_compute += (_t2 - _t1);
-        timing_reduce += (_t3 - _t2);
+        timing_compute += (_t1 - _t0);  // Load and compute are interleaved
       }
-      if (tx == 256) {
-        timing_load_t256 += (_t1 - _t0);
-        timing_compute_t256 += (_t2 - _t1);
-        timing_reduce_t256 += (_t3 - _t2);
+      long long _t_dsm_start = clock64();
+#endif
+
+      // Store partial aggregates to shared memory for DSM access
+      if (tx == 0) {
+        #pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+          smem_pivot_aggregates[pv] = partial_aggregates[pv];
+        }
       }
-#endif
-    }
-#ifdef FLASHINFER_ENABLE_TIMING
-    long long _t_dsm_start = clock64();
-#endif
-    if (cluster_size > 1){
+      __syncthreads();
+
+      // DSM aggregation: block 0 collects all partial results from all blocks
       cluster.sync();
-      if (clusterBlockRank == 0){
+
+      if (clusterBlockRank == 0) {
+        // Aggregate results from all blocks for each pivot
+        ValueCount<float> full_aggregates[PIVOTS_PER_BLOCK];
+        #pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+          full_aggregates[pv] = {0, 0};
+        }
+
+        for (int blk = 0; blk < cluster_size; ++blk) {
+          ValueCount<float>* remote_aggregates =
+              cluster.map_shared_rank(smem_pivot_aggregates, blk);
+          #pragma unroll
+          for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+            full_aggregates[pv] += remote_aggregates[pv];
+          }
+        }
+
+        // Binary search: find the pivot that satisfies top-k/top-p constraint
         double old_low = low;
-        for(int i = 0; i < cluster_size; ++i){
-          aggregate_gt_pivot = *cluster.map_shared_rank(&temp_storage.block_aggregate.pair, i);
-          pivot = old_low + (i+1) * step;
-          if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
+        #pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+          pivot = old_low + (pv + 1) * step;
+          if (full_aggregates[pv].count < k && full_aggregates[pv].value < p) {
             high = pivot;
-            gt_high_count = aggregate_gt_pivot.count;
+            gt_high_count = full_aggregates[pv].count;
             break;
           } else {
             low = pivot;
-            gt_low_count = aggregate_gt_pivot.count;
+            gt_low_count = full_aggregates[pv].count;
           }
         }
+
         if (tx == 0) {
           smem_low = low;
           smem_high = high;
@@ -1283,14 +1325,98 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
         }
         __syncthreads();
       }
+
+      // Broadcast updated [low, high] to all blocks
       cluster.sync();
-      if (clusterBlockRank != 0){
+      if (clusterBlockRank != 0) {
         low = *cluster.map_shared_rank(&smem_low, 0);
         high = *cluster.map_shared_rank(&smem_high, 0);
         gt_low_count = *cluster.map_shared_rank(&smem_gt_low_count, 0);
         gt_high_count = *cluster.map_shared_rank(&smem_gt_high_count, 0);
       }
-    } else {
+
+#ifdef FLASHINFER_ENABLE_TIMING
+      if (tx == 0) {
+        timing_dsm += (clock64() - _t_dsm_start);
+      }
+#endif
+      ++n_iter;
+    } while (low < high);
+
+  } else {
+    // =====================================================================
+    // Original path for cluster_size == 1: single block reads full vocab
+    // =====================================================================
+    do {
+      if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-7) {
+        break;
+      }
+      double step = (high-low) / (cluster_size+1);
+      pivot = low + (clusterBlockRank+1) * step;
+
+      ValueCount<float> aggregate_gt_pivot{0, 0};
+#pragma unroll 2
+      for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+#ifdef FLASHINFER_ENABLE_TIMING
+        __syncthreads();
+        long long _t0 = clock64();
+#endif
+
+        // ===== Phase 1: Load =====
+        probs_vec.fill(0);
+        if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
+          probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+        }
+
+#ifdef FLASHINFER_ENABLE_TIMING
+        // Force data to actually arrive by touching it (prevent load-use latency hiding)
+        #pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+          asm volatile("" : "+f"(probs_vec[j]));
+        }
+        __syncthreads();
+        long long _t1 = clock64();
+#endif
+
+        // ===== Phase 2: Compute probs_gt_pivot =====
+        ValueCount<float> probs_gt_pivot[VEC_SIZE];
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+          probs_gt_pivot[j] = {
+              (probs_vec[j] > pivot) ? probs_vec[j] : 0,
+              (probs_vec[j] > pivot && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+        }
+
+#ifdef FLASHINFER_ENABLE_TIMING
+        __syncthreads();
+        long long _t2 = clock64();
+#endif
+
+        // ===== Phase 3: BlockReduce =====
+        aggregate_gt_pivot +=
+            BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
+                .Sum<VEC_SIZE>(probs_gt_pivot);
+        if (tx == 0) {
+          temp_storage.block_aggregate.pair = aggregate_gt_pivot;
+        }
+        __syncthreads();
+        aggregate_gt_pivot = temp_storage.block_aggregate.pair;
+
+#ifdef FLASHINFER_ENABLE_TIMING
+        long long _t3 = clock64();
+        if (tx == 0) {
+          timing_load += (_t1 - _t0);
+          timing_compute += (_t2 - _t1);
+          timing_reduce += (_t3 - _t2);
+        }
+        if (tx == 256) {
+          timing_load_t256 += (_t1 - _t0);
+          timing_compute_t256 += (_t2 - _t1);
+          timing_reduce_t256 += (_t3 - _t2);
+        }
+#endif
+      }
+
       if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
         high = pivot;
         gt_high_count = aggregate_gt_pivot.count;
@@ -1298,26 +1424,10 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
         low = pivot;
         gt_low_count = aggregate_gt_pivot.count;
       }
-    }
-#ifdef FLASHINFER_ENABLE_TIMING
-    if (tx == 0) {
-      timing_dsm += (clock64() - _t_dsm_start);
-    }
-    if (tx == 256) {
-      timing_dsm_t256 += (clock64() - _t_dsm_start);
-    }
-#endif
-    ++n_iter;
-    // if(n_iter > 1000){
-    //   break;
-    // }else{
-    //   if(tx == 0){
-    //     printf("clusterBlockRank=%d, low=%.32e, high=%.32e, gt_low_count=%d, gt_high_count=%d, n_iter=%d, step=%.32e, \n", 
-    //       clusterBlockRank, low, high, gt_low_count, gt_high_count, n_iter, (high-low) / (cluster_size+1)
-    //     );
-    //   }
-    // }
-  } while (low < high);
+
+      ++n_iter;
+    } while (low < high);
+  }
 
   if (clusterBlockRank != 0) return;
   __syncthreads();
@@ -1380,13 +1490,13 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
 
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
-          typename DType, typename IdType, int cluster_size=1>
+          typename DType, typename IdType, int cluster_size=1, int PIVOTS_PER_BLOCK=4>
 __global__ void GetTopKTopPFilteredProbKernel(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
                                                IdType* indices, IdType top_k_val,
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
                                                uint64_t philox_offset) {
-  GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, 
-                            VEC_SIZE, DETERMINISTIC, DType, IdType, cluster_size>
+  GetTopKTopPFilteredProbDevice<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
+                            VEC_SIZE, DETERMINISTIC, DType, IdType, cluster_size, PIVOTS_PER_BLOCK>
       (probs, filtered_probs, top_k_arr, top_p_arr,
       indices, top_k_val,
       top_p_val, d, philox_seed,
