@@ -1130,6 +1130,18 @@ __global__ void MinPSamplingFromProbKernel(DType* probs, float* min_p_arr, IdTyp
   output[bx] = sampled_id;
 }
 
+// Helper struct for dynamic shared memory layout in GetTopKTopPFilteredProb
+template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM, int PIVOTS_PER_BLOCK>
+struct GetTopKTopPFilteredProbSmemLayout {
+  SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
+  double smem_low;
+  double smem_high;
+  float smem_gt_low_count;
+  float smem_gt_high_count;
+  ValueCount<float> smem_pivot_aggregates[PIVOTS_PER_BLOCK];
+};
+
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
           typename DType, typename IdType, int cluster_size=1, int PIVOTS_PER_BLOCK=4>
@@ -1148,14 +1160,18 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   const uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
   const float p = top_p_arr == nullptr ? top_p_val : top_p_arr[row_idx];
 
-  __shared__ double smem_low;
-  __shared__ double smem_high;
-  __shared__ float smem_gt_low_count;
-  __shared__ float smem_gt_high_count;
-  __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
+  // Dynamic shared memory
+  extern __shared__ __align__(alignof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, PIVOTS_PER_BLOCK>))
+      uint8_t smem_raw[];
+  auto& smem = *reinterpret_cast<GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, PIVOTS_PER_BLOCK>*>(smem_raw);
 
-  // Shared memory for multi-pivot aggregates (used when cluster_size > 1)
-  __shared__ ValueCount<float> smem_pivot_aggregates[PIVOTS_PER_BLOCK];
+  // Aliases for cleaner code
+  auto& temp_storage = smem.temp_storage;
+  auto& smem_low = smem.smem_low;
+  auto& smem_high = smem.smem_high;
+  auto& smem_gt_low_count = smem.smem_gt_low_count;
+  auto& smem_gt_high_count = smem.smem_gt_high_count;
+  auto& smem_pivot_aggregates = smem.smem_pivot_aggregates;
 
 // #define FLASHINFER_ENABLE_TIMING
 
@@ -1927,64 +1943,65 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
-  // DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
-        // const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>) + sizeof(float) + 2*sizeof(double);
-        DISPATCH_ALIGNED_VEC_SIZE(
-            vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-              if (batch_size > 16){
-                constexpr uint32_t BLOCK_THREADS = 1024;
-                constexpr int cluster_size = 1;
-                auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
-                cudaLaunchAttribute attribute[1];
-                attribute[0].id = cudaLaunchAttributeClusterDimension;
-                attribute[0].val.clusterDim.x = cluster_size;
-                attribute[0].val.clusterDim.y = 1;
-                attribute[0].val.clusterDim.z = 1;
+  DISPATCH_ALIGNED_VEC_SIZE(
+      vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+        constexpr int PIVOTS_PER_BLOCK = 4;
 
-                cudaLaunchConfig_t config = {0};
-                config.gridDim = batch_size * cluster_size;
-                config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
-                config.stream = stream;
-                config.numAttrs = 1;
-                config.attrs = attribute;
+        if (batch_size > 16) {
+          constexpr uint32_t BLOCK_THREADS = 1024;
+          constexpr int cluster_size = 1;
+          const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+          cudaLaunchAttribute attribute[1];
+          attribute[0].id = cudaLaunchAttributeClusterDimension;
+          attribute[0].val.clusterDim.x = cluster_size;
+          attribute[0].val.clusterDim.y = 1;
+          attribute[0].val.clusterDim.z = 1;
 
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                FLASHINFER_CUDA_CALL(
-                    cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr, 
-                      indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
-              } else {
-                constexpr uint32_t BLOCK_THREADS = 512;
-                constexpr int cluster_size = 8;
-                auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
-                cudaLaunchAttribute attribute[1];
-                attribute[0].id = cudaLaunchAttributeClusterDimension;
-                attribute[0].val.clusterDim.x = cluster_size;
-                attribute[0].val.clusterDim.y = 1;
-                attribute[0].val.clusterDim.z = 1;
+          cudaLaunchConfig_t config = {0};
+          config.gridDim = batch_size * cluster_size;
+          config.blockDim = BLOCK_THREADS;
+          config.dynamicSmemBytes = smem_size;
+          config.stream = stream;
+          config.numAttrs = 1;
+          config.attrs = attribute;
 
-                cudaLaunchConfig_t config = {0};
-                config.gridDim = batch_size * cluster_size;
-                config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
-                config.stream = stream;
-                config.numAttrs = 1;
-                config.attrs = attribute;
+          FLASHINFER_CUDA_CALL(
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+          FLASHINFER_CUDA_CALL(
+              cudaLaunchKernelEx(&config, kernel,
+                probs, filtered_probs, top_k_arr, top_p_arr,
+                indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
+        } else {
+          constexpr uint32_t BLOCK_THREADS = 1024;
+          constexpr int cluster_size = 8;
+          const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+          cudaLaunchAttribute attribute[1];
+          attribute[0].id = cudaLaunchAttributeClusterDimension;
+          attribute[0].val.clusterDim.x = cluster_size;
+          attribute[0].val.clusterDim.y = 1;
+          attribute[0].val.clusterDim.z = 1;
 
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                FLASHINFER_CUDA_CALL(
-                    cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr, 
-                      indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
-              }
-            })});
-        return cudaSuccess;
-  // });
+          cudaLaunchConfig_t config = {0};
+          config.gridDim = batch_size * cluster_size;
+          config.blockDim = BLOCK_THREADS;
+          config.dynamicSmemBytes = smem_size;
+          config.stream = stream;
+          config.numAttrs = 1;
+          config.attrs = attribute;
+
+          FLASHINFER_CUDA_CALL(
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+          FLASHINFER_CUDA_CALL(
+              cudaLaunchKernelEx(&config, kernel,
+                probs, filtered_probs, top_k_arr, top_p_arr,
+                indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
+        }
+      })});
+  return cudaSuccess;
 }
 
 template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM>
