@@ -1130,13 +1130,24 @@ __global__ void MinPSamplingFromProbKernel(DType* probs, float* min_p_arr, IdTyp
   output[bx] = sampled_id;
 }
 
+// Helper struct for dynamic shared memory layout in GetTopKTopPFilteredProb
+template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM>
+struct GetTopKTopPFilteredProbSmemLayout {
+  SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
+  double smem_low;
+  double smem_high;
+  float smem_gt_low_count;
+  float smem_gt_high_count;
+};
+
 template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
           typename DType, typename IdType, int cluster_size=1>
 __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
                                                IdType* indices, IdType top_k_val,
                                                float top_p_val, uint32_t d, uint64_t philox_seed,
-                                               uint64_t philox_offset, 
+                                               uint64_t philox_offset,
                                                double low = 0, double high = 1) {
   namespace cg = cooperative_groups;
   auto cluster = cg::this_cluster();
@@ -1148,11 +1159,17 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   const uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
   const float p = top_p_arr == nullptr ? top_p_val : top_p_arr[row_idx];
 
-  __shared__ double smem_low;
-  __shared__ double smem_high;
-  __shared__ float smem_gt_low_count;
-  __shared__ float smem_gt_high_count;
-  __shared__ SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
+  // Dynamic shared memory
+  extern __shared__ __align__(alignof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
+      uint8_t smem_raw[];
+  auto& smem = *reinterpret_cast<GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>*>(smem_raw);
+
+  // Aliases for cleaner code
+  auto& temp_storage = smem.temp_storage;
+  auto& smem_low = smem.smem_low;
+  auto& smem_high = smem.smem_high;
+  auto& smem_gt_low_count = smem.smem_gt_low_count;
+  auto& smem_gt_high_count = smem.smem_gt_high_count;
 // #define FLASHINFER_ENABLE_TIMING
 
 #ifdef FLASHINFER_ENABLE_TIMING
@@ -1818,12 +1835,12 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
 
   auto compute_capacity = GetCudaComputeCapability();
   // DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
-        // const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>) + sizeof(float) + 2*sizeof(double);
         DISPATCH_ALIGNED_VEC_SIZE(
             vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
               if (batch_size > 16){
                 constexpr uint32_t BLOCK_THREADS = 1024;
                 constexpr int cluster_size = 1;
+                const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                               VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
                 cudaLaunchAttribute attribute[1];
@@ -1835,20 +1852,21 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                 cudaLaunchConfig_t config = {0};
                 config.gridDim = batch_size * cluster_size;
                 config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
+                config.dynamicSmemBytes = smem_size;
                 config.stream = stream;
                 config.numAttrs = 1;
                 config.attrs = attribute;
 
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                FLASHINFER_CUDA_CALL(
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 FLASHINFER_CUDA_CALL(
                     cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr, 
+                      probs, filtered_probs, top_k_arr, top_p_arr,
                       indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
               } else {
                 constexpr uint32_t BLOCK_THREADS = 512;
                 constexpr int cluster_size = 8;
+                const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
                 auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                               VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
                 cudaLaunchAttribute attribute[1];
@@ -1860,16 +1878,16 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                 cudaLaunchConfig_t config = {0};
                 config.gridDim = batch_size * cluster_size;
                 config.blockDim = BLOCK_THREADS;
-                // config.dynamicSmemBytes = smem_size;
+                config.dynamicSmemBytes = smem_size;
                 config.stream = stream;
                 config.numAttrs = 1;
                 config.attrs = attribute;
 
-                // FLASHINFER_CUDA_CALL(
-                //     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                FLASHINFER_CUDA_CALL(
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 FLASHINFER_CUDA_CALL(
                     cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr, 
+                      probs, filtered_probs, top_k_arr, top_p_arr,
                       indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
               }
             })});
