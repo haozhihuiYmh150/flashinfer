@@ -139,8 +139,6 @@ def test_case(func_name, func, num_warmup, num_runs, *args, **kwargs):
 
 def test_top_k_top_p_sampling_performance(batch_size=16):
     """测试top-k和top-p采样函数的性能，batch size=64，所有batch使用相同的top-k和top-p"""
-    print(50*"#")
-
     # 测试配置
     vocab_size = 151936  # LLM词表大小
     num_runs = 400  # 运行多次取平均
@@ -182,14 +180,9 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     )
     
     # 打印性能结果
-    print(f"perf (func2 vs func1): {case1_ret[1]/case2_ret[1]:.2f}x")
-    print(f" (batch_size={batch_size}, vocab_size={vocab_size}, top_k={top_k_value}, top_p={top_p_value}, )")
-    print(f" func1 - {case1_ret[0]}: avg: {case1_ret[1]:.3f} ms\n"
-        f" func2 - {case2_ret[0]}: avg: {case2_ret[1]:.3f} ms")
+    print(f"{batch_size=}, func1/func2: ratio={case1_ret[1]/case2_ret[1]:.2f}, avg_cost={case1_ret[1]:.3f}/{case2_ret[1]:.3f} ms,")
 
 def test_top_k_top_p_sampling_acc(batch_size=1):
-    print(50*"#")
-
     # 测试配置
     vocab_size = 151936  # LLM词表大小
     top_k_value = 1024
@@ -218,13 +211,11 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
         filter_apply_order="joint",
         check_nan=False,
     )
-    print(f'{torch.equal(my_ret, gloden_ret)=}')
 
     mask = my_ret != gloden_ret
     diff_my = my_ret[mask]
     diff_golden = gloden_ret[mask]
-    print(f'{diff_my=}')
-    print(f'{diff_golden=}')
+    print(f'{torch.equal(my_ret, gloden_ret)=}, {diff_my=}, {diff_golden=},')
 
 if __name__ == "__main__":
     # torch.set_printoptions(threshold=float('inf'), precision=6)
@@ -235,9 +226,8 @@ if __name__ == "__main__":
     # test_top_k_top_p_sampling_acc(128)
     # test_top_k_top_p_sampling_acc(160)
 
-    for i in range(16):
-        test_top_k_top_p_sampling_performance(i+1)
-
     # test_top_k_top_p_sampling_performance(1)
     # for i in range(16):
     #     test_top_k_top_p_sampling_performance((i+1)*16)
+    for i in range(16):
+        test_top_k_top_p_sampling_performance(i+1)
