@@ -51,6 +51,50 @@ namespace sampling {
 
 using namespace cub;
 
+// Helper function to print kernel resource usage for debugging
+template <typename KernelFunc>
+void PrintKernelResourceUsage(KernelFunc kernel, uint32_t block_threads, uint32_t smem_size,
+                               int cluster_size, const char* kernel_name) {
+  cudaFuncAttributes attr;
+  cudaError_t err = cudaFuncGetAttributes(&attr, kernel);
+  if (err != cudaSuccess) {
+    printf("[%s] Failed to get kernel attributes: %s\n", kernel_name, cudaGetErrorString(err));
+    return;
+  }
+
+  int numBlocksPerSM = 0;
+  err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSM, kernel, block_threads, smem_size);
+  if (err != cudaSuccess) {
+    printf("[%s] Failed to query occupancy: %s\n", kernel_name, cudaGetErrorString(err));
+  }
+
+  printf("=== Kernel Resource Usage: %s ===\n", kernel_name);
+  printf("  Registers per thread:     %d\n", attr.numRegs);
+  printf("  Static shared memory:     %zu bytes\n", attr.sharedSizeBytes);
+  printf("  Dynamic shared memory:    %u bytes\n", smem_size);
+  printf("  Total shared memory:      %zu bytes\n", attr.sharedSizeBytes + smem_size);
+  printf("  Max threads per block:    %d\n", attr.maxThreadsPerBlock);
+  printf("  Requested threads/block:  %u\n", block_threads);
+  printf("  Cluster size:             %d\n", cluster_size);
+  printf("  Max blocks per SM:        %d\n", numBlocksPerSM);
+  printf("  Blocks needed per SM for cluster: %d\n", cluster_size);
+
+  // Check if launch is feasible
+  if (numBlocksPerSM < cluster_size) {
+    printf("  [ERROR] Cannot launch: need %d blocks per SM for cluster, but only %d available!\n",
+           cluster_size, numBlocksPerSM);
+    printf("  Possible causes:\n");
+    printf("    - Registers: %d threads * %d regs = %d total (SM has 65536)\n",
+           block_threads, attr.numRegs, block_threads * attr.numRegs);
+    printf("    - Shared mem: %zu bytes per block, %d blocks need %zu bytes (SM has ~228KB)\n",
+           attr.sharedSizeBytes + smem_size, cluster_size,
+           (attr.sharedSizeBytes + smem_size) * cluster_size);
+  } else {
+    printf("  [OK] Launch should succeed\n");
+  }
+  printf("==========================================\n");
+}
+
 #define DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, ...) \
   if (deterministic) {                                            \
     constexpr bool DETERMINISTIC = true;                          \
@@ -1953,6 +1997,10 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+
+          // Debug: print resource usage
+          PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch>16)");
+
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeClusterDimension;
           attribute[0].val.clusterDim.x = cluster_size;
@@ -1979,6 +2027,10 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+
+          // Debug: print resource usage
+          PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch<=16)");
+
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeClusterDimension;
           attribute[0].val.clusterDim.x = cluster_size;
