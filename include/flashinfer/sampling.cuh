@@ -1834,65 +1834,44 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
-  // DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
-        DISPATCH_ALIGNED_VEC_SIZE(
-            vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-              if (batch_size > 16){
-                constexpr uint32_t BLOCK_THREADS = 1024;
-                constexpr int cluster_size = 1;
-                const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
-                auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
-                cudaLaunchAttribute attribute[1];
-                attribute[0].id = cudaLaunchAttributeClusterDimension;
-                attribute[0].val.clusterDim.x = cluster_size;
-                attribute[0].val.clusterDim.y = 1;
-                attribute[0].val.clusterDim.z = 1;
+  DISPATCH_ALIGNED_VEC_SIZE(
+      vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+        constexpr uint32_t BLOCK_THREADS = 1024;
+        const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
 
-                cudaLaunchConfig_t config = {0};
-                config.gridDim = batch_size * cluster_size;
-                config.blockDim = BLOCK_THREADS;
-                config.dynamicSmemBytes = smem_size;
-                config.stream = stream;
-                config.numAttrs = 1;
-                config.attrs = attribute;
+        // Macro to reduce code duplication
+        #define LAUNCH_KERNEL(CLUSTER_SIZE) do { \
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, \
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, CLUSTER_SIZE>; \
+          cudaLaunchAttribute attribute[1]; \
+          attribute[0].id = cudaLaunchAttributeClusterDimension; \
+          attribute[0].val.clusterDim.x = CLUSTER_SIZE; \
+          attribute[0].val.clusterDim.y = 1; \
+          attribute[0].val.clusterDim.z = 1; \
+          cudaLaunchConfig_t config = {0}; \
+          config.gridDim = batch_size * CLUSTER_SIZE; \
+          config.blockDim = BLOCK_THREADS; \
+          config.dynamicSmemBytes = smem_size; \
+          config.stream = stream; \
+          config.numAttrs = 1; \
+          config.attrs = attribute; \
+          FLASHINFER_CUDA_CALL( \
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size)); \
+          FLASHINFER_CUDA_CALL( \
+              cudaLaunchKernelEx(&config, kernel, \
+                probs, filtered_probs, top_k_arr, top_p_arr, \
+                indices, top_k_val, top_p_val, d, philox_seed, philox_offset)); \
+        } while (0)
 
-                FLASHINFER_CUDA_CALL(
-                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                FLASHINFER_CUDA_CALL(
-                    cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr,
-                      indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
-              } else {
-                constexpr uint32_t BLOCK_THREADS = 1024;
-                constexpr int cluster_size = 8;
-                const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
-                auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                              VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size>;
-                cudaLaunchAttribute attribute[1];
-                attribute[0].id = cudaLaunchAttributeClusterDimension;
-                attribute[0].val.clusterDim.x = cluster_size;
-                attribute[0].val.clusterDim.y = 1;
-                attribute[0].val.clusterDim.z = 1;
+        if (batch_size > 16) {
+          LAUNCH_KERNEL(1);
+        } else {
+          LAUNCH_KERNEL(8);
+        }
 
-                cudaLaunchConfig_t config = {0};
-                config.gridDim = batch_size * cluster_size;
-                config.blockDim = BLOCK_THREADS;
-                config.dynamicSmemBytes = smem_size;
-                config.stream = stream;
-                config.numAttrs = 1;
-                config.attrs = attribute;
-
-                FLASHINFER_CUDA_CALL(
-                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                FLASHINFER_CUDA_CALL(
-                    cudaLaunchKernelEx(&config, kernel,
-                      probs, filtered_probs, top_k_arr, top_p_arr,
-                      indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
-              }
-            })});
-        return cudaSuccess;
-  // });
+        #undef LAUNCH_KERNEL
+      })});
+  return cudaSuccess;
 }
 
 template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM>
