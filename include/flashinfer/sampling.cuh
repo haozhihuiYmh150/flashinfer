@@ -2019,9 +2019,9 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
         cudaError_t status = cudaSuccess;
         if (batch_size <= 8) {
           // Small batch: maximize cluster parallelism, use more pivots
-          constexpr uint32_t BLOCK_THREADS = 512;
+          constexpr uint32_t BLOCK_THREADS = 1024;
           constexpr int cluster_size = 8;
-          constexpr int PIVOTS_PER_BLOCK = 4;
+          constexpr int PIVOTS_PER_BLOCK = 1;
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
@@ -2031,7 +2031,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
           // Medium batch: reduce cluster size to avoid scheduling pressure
           constexpr uint32_t BLOCK_THREADS = 512;
           constexpr int cluster_size = 4;
-          constexpr int PIVOTS_PER_BLOCK = 4;
+          constexpr int PIVOTS_PER_BLOCK = 2;
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
@@ -2040,7 +2040,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
         } else if (batch_size <= 64) {
           // Larger batch: use smaller cluster
           constexpr uint32_t BLOCK_THREADS = 512;
-          constexpr int cluster_size = 2;
+          constexpr int cluster_size = 1;
           constexpr int PIVOTS_PER_BLOCK = 2;
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
