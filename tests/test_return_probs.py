@@ -229,5 +229,5 @@ if __name__ == "__main__":
     # test_top_k_top_p_sampling_performance(1)
     # for i in range(16):
     #     test_top_k_top_p_sampling_performance((i+1)*16)
-    for i in range(16):
-        test_top_k_top_p_sampling_performance(i+1)
+    for i in range(1, 129, 4):
+        test_top_k_top_p_sampling_performance(i)
