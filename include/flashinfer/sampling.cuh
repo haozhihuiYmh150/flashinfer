@@ -1989,18 +1989,11 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_ALIGNED_VEC_SIZE(
       vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-        constexpr int PIVOTS_PER_BLOCK = 4;
+        // Dynamic cluster_size and PIVOTS_PER_BLOCK based on batch_size
+        // After reduce optimization, higher pivots reduces iterations with minimal overhead
 
-        if (batch_size > 16) {
-          constexpr uint32_t BLOCK_THREADS = 1024;
-          constexpr int cluster_size = 1;
-          const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
-          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
-                                                      VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
-
-          // Debug: print resource usage
-          // PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch>16)");
-
+        // Helper lambda to launch kernel with cluster config
+        auto launch_kernel = [&](auto kernel, uint32_t smem_size, int cluster_size, uint32_t block_threads) -> cudaError_t {
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeClusterDimension;
           attribute[0].val.clusterDim.x = cluster_size;
@@ -2009,49 +2002,62 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
 
           cudaLaunchConfig_t config = {0};
           config.gridDim = batch_size * cluster_size;
-          config.blockDim = BLOCK_THREADS;
+          config.blockDim = block_threads;
           config.dynamicSmemBytes = smem_size;
           config.stream = stream;
           config.numAttrs = 1;
           config.attrs = attribute;
 
-          FLASHINFER_CUDA_CALL(
-              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-          FLASHINFER_CUDA_CALL(
-              cudaLaunchKernelEx(&config, kernel,
+          cudaError_t status = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+          if (status != cudaSuccess) return status;
+          status = cudaLaunchKernelEx(&config, kernel,
                 probs, filtered_probs, top_k_arr, top_p_arr,
-                indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
-        } else {
+                indices, top_k_val, top_p_val, d, philox_seed, philox_offset);
+          return status;
+        };
+
+        cudaError_t status = cudaSuccess;
+        if (batch_size <= 8) {
+          // Small batch: maximize cluster parallelism, use more pivots
           constexpr uint32_t BLOCK_THREADS = 512;
           constexpr int cluster_size = 8;
+          constexpr int PIVOTS_PER_BLOCK = 4;
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cluster_size, BLOCK_THREADS);
 
-          // Debug: print resource usage
-          // PrintKernelResourceUsage(kernel, BLOCK_THREADS, smem_size, cluster_size, "GetTopKTopPFilteredProbKernel (batch<=16)");
+        } else if (batch_size <= 32) {
+          // Medium batch: reduce cluster size to avoid scheduling pressure
+          constexpr uint32_t BLOCK_THREADS = 512;
+          constexpr int cluster_size = 4;
+          constexpr int PIVOTS_PER_BLOCK = 4;
+          const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cluster_size, BLOCK_THREADS);
 
-          cudaLaunchAttribute attribute[1];
-          attribute[0].id = cudaLaunchAttributeClusterDimension;
-          attribute[0].val.clusterDim.x = cluster_size;
-          attribute[0].val.clusterDim.y = 1;
-          attribute[0].val.clusterDim.z = 1;
+        } else if (batch_size <= 64) {
+          // Larger batch: use smaller cluster
+          constexpr uint32_t BLOCK_THREADS = 512;
+          constexpr int cluster_size = 2;
+          constexpr int PIVOTS_PER_BLOCK = 2;
+          const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cluster_size, BLOCK_THREADS);
 
-          cudaLaunchConfig_t config = {0};
-          config.gridDim = batch_size * cluster_size;
-          config.blockDim = BLOCK_THREADS;
-          config.dynamicSmemBytes = smem_size;
-          config.stream = stream;
-          config.numAttrs = 1;
-          config.attrs = attribute;
-
-          FLASHINFER_CUDA_CALL(
-              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-          FLASHINFER_CUDA_CALL(
-              cudaLaunchKernelEx(&config, kernel,
-                probs, filtered_probs, top_k_arr, top_p_arr,
-                indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
+        } else {
+          // Large batch: batch parallelism is sufficient, no cluster needed
+          constexpr uint32_t BLOCK_THREADS = 1024;
+          constexpr int cluster_size = 1;
+          constexpr int PIVOTS_PER_BLOCK = 2;
+          const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cluster_size, BLOCK_THREADS);
         }
+        if (status != cudaSuccess) return status;
       })});
   return cudaSuccess;
 }
