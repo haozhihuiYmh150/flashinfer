@@ -1989,7 +1989,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_ALIGNED_VEC_SIZE(
       vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-        constexpr int PIVOTS_PER_BLOCK = 2;
+        constexpr int PIVOTS_PER_BLOCK = 1;
 
         if (batch_size > 16) {
           constexpr uint32_t BLOCK_THREADS = 1024;
@@ -2023,7 +2023,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                 indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
         } else {
           constexpr uint32_t BLOCK_THREADS = 512;
-          constexpr int cluster_size = 4;
+          constexpr int cluster_size = 8;
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
