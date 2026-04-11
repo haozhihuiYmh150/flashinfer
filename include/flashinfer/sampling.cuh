@@ -2023,7 +2023,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
                 indices, top_k_val, top_p_val, d, philox_seed, philox_offset));
         } else {
           constexpr uint32_t BLOCK_THREADS = 1024;
-          constexpr int cluster_size = 8;
+          constexpr int cluster_size = 2;
           const uint32_t smem_size = sizeof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, PIVOTS_PER_BLOCK>);
           auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
                                                       VEC_SIZE, DETERMINISTIC, T, IdType, cluster_size, PIVOTS_PER_BLOCK>;
