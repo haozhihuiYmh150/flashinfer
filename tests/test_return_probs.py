@@ -156,8 +156,8 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     top_ps = torch.full((batch_size,), top_p_value, dtype=torch.float32, device=device)
 
     case1_ret = test_case(
-        "top_k_top_p_filter_return_probs", 
-        top_k_top_p_filter_return_probs, 
+        "top_k_top_p_filter_return_probs",
+        top_k_top_p_filter_return_probs,
         10,
         400,
         probs.contiguous(),
@@ -168,8 +168,8 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
     )
 
     case2_ret = test_case(
-        "top_k_top_p_sampling_from_probs", 
-        top_k_top_p_sampling_from_probs, 
+        "top_k_top_p_sampling_from_probs",
+        top_k_top_p_sampling_from_probs,
         10,
         400,
         probs.contiguous(),
@@ -178,9 +178,17 @@ def test_top_k_top_p_sampling_performance(batch_size=16):
         filter_apply_order="joint",
         check_nan=False,
     )
-    
+
     # 打印性能结果
     print(f"{batch_size=}, func1/func2: ratio={case1_ret[1]/case2_ret[1]:.2f}, avg_cost={case1_ret[1]:.3f}/{case2_ret[1]:.3f} ms,")
+
+    # 返回结果用于批量测试
+    return {
+        'batch_size': batch_size,
+        'func1_time': case1_ret[1],
+        'func2_time': case2_ret[1],
+        'ratio': case1_ret[1] / case2_ret[1]
+    }
 
 def test_top_k_top_p_sampling_acc(batch_size=1):
     # 测试配置
@@ -217,15 +225,243 @@ def test_top_k_top_p_sampling_acc(batch_size=1):
     diff_golden = gloden_ret[mask]
     print(f'{torch.equal(my_ret, gloden_ret)=}, {diff_my=}, {diff_golden=},')
 
-if __name__ == "__main__":
-    # torch.set_printoptions(threshold=float('inf'), precision=6)
-    test_top_k_top_p_sampling_acc(1)
-    # test_top_k_top_p_sampling_acc(8)
-    # test_top_k_top_p_sampling_acc(16)
-    # test_top_k_top_p_sampling_acc(32)
-    # test_top_k_top_p_sampling_acc(128)
-    # test_top_k_top_p_sampling_acc(160)
+BENCHMARK_FILE = "benchmark_history.json"
 
-    # test_top_k_top_p_sampling_performance(1)
-    for i in range(1, 129, 8):
-        test_top_k_top_p_sampling_performance(i)
+def save_benchmark(config_name, results):
+    """将 benchmark 结果追加到 JSON 文件"""
+    import json
+    import datetime
+    import os
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = {
+        'name': config_name,
+        'timestamp': timestamp,
+        'results': results
+    }
+
+    # 加载现有数据或创建新列表
+    history = []
+    if os.path.exists(BENCHMARK_FILE):
+        with open(BENCHMARK_FILE, 'r') as f:
+            try:
+                history = json.load(f)
+            except json.JSONDecodeError:
+                history = []
+
+    history.append(entry)
+
+    # 保存
+    with open(BENCHMARK_FILE, 'w') as f:
+        json.dump(history, f, indent=2)
+
+    print(f"[Saved] {config_name} @ {timestamp} -> {BENCHMARK_FILE}")
+    return entry
+
+def load_benchmarks():
+    """从 JSON 文件加载所有历史 benchmark 结果"""
+    import json
+    import os
+
+    if not os.path.exists(BENCHMARK_FILE):
+        print(f"No benchmark history found at {BENCHMARK_FILE}")
+        return []
+
+    with open(BENCHMARK_FILE, 'r') as f:
+        history = json.load(f)
+
+    print(f"[Loaded] {len(history)} benchmark(s) from {BENCHMARK_FILE}")
+    for i, entry in enumerate(history):
+        print(f"  [{i}] {entry['name']} @ {entry['timestamp']}")
+    return history
+
+def clear_benchmarks():
+    """清空历史记录"""
+    import os
+    if os.path.exists(BENCHMARK_FILE):
+        os.remove(BENCHMARK_FILE)
+        print(f"[Cleared] {BENCHMARK_FILE}")
+
+def run_batch_benchmark(config_name="default"):
+    """运行批量测试，保存结果到文件，并渲染 ASCII 图表"""
+    batch_sizes = list(range(1, 129, 4))
+    results = []
+
+    print(f"\n{'='*60}")
+    print(f"Running benchmark: {config_name}")
+    print(f"{'='*60}")
+
+    for bs in batch_sizes:
+        result = test_top_k_top_p_sampling_performance(bs)
+        results.append(result)
+
+    # 保存到 JSON 文件
+    entry = save_benchmark(config_name, results)
+
+    # 渲染 ASCII 图表
+    render_speedup_chart(config_name, results)
+
+    return entry
+
+def render_speedup_chart(config_name, results):
+    """渲染单次 benchmark 的 ASCII 图表"""
+    print(f"\n{'='*60}")
+    print(f"Speedup Ratio - {config_name}")
+    print(f"{'='*60}")
+
+    print(f"\n[func1/func2, lower is better, <1.0 means faster]")
+    print(f"{'batch':<6} {'ratio':<8} {'bar (1.0 = same speed)'}")
+    print("-" * 60)
+    for r in results:
+        ratio = r['ratio']
+        if ratio <= 1.0:
+            bar_len = int((1.0 - ratio) * 40)
+            bar = "◀" + "━" * bar_len + "│"
+            status = f"faster {(1.0/ratio - 1)*100:.0f}%"
+        else:
+            bar_len = int((ratio - 1.0) * 20)
+            bar = "│" + "━" * bar_len + "▶"
+            status = f"slower {(ratio - 1)*100:.0f}%"
+        print(f"{r['batch_size']:<6} {ratio:<8.2f} {bar} ({status})")
+
+    # 统计摘要
+    print(f"\n{'='*60}")
+    print("Summary:")
+    print(f"  Best ratio:  {min(r['ratio'] for r in results):.2f} at batch={min(results, key=lambda x: x['ratio'])['batch_size']}")
+    print(f"  Worst ratio: {max(r['ratio'] for r in results):.2f} at batch={max(results, key=lambda x: x['ratio'])['batch_size']}")
+    print(f"  Avg ratio:   {sum(r['ratio'] for r in results) / len(results):.2f}")
+    faster_count = sum(1 for r in results if r['ratio'] < 1.0)
+    print(f"  Faster in {faster_count}/{len(results)} cases")
+    print(f"{'='*60}")
+
+
+def compare_benchmarks(*indices):
+    """
+    对比历史 benchmark 结果
+
+    用法:
+      compare_benchmarks()       # 对比所有历史结果
+      compare_benchmarks(-1, -2) # 对比最近两次
+      compare_benchmarks(0, 2)   # 对比第 0 和第 2 次
+    """
+    history = load_benchmarks()
+    if len(history) < 2:
+        print("需要至少 2 个 benchmark 结果进行对比")
+        return
+
+    # 如果指定了索引，选择对应的 benchmark
+    if indices:
+        benchmark_results = [history[i] for i in indices]
+    else:
+        benchmark_results = history
+
+    # 获取所有 batch sizes
+    batch_sizes = [r['batch_size'] for r in benchmark_results[0]['results']]
+
+    # 打印表头
+    print(f"\n{'='*80}")
+    print("Benchmark Comparison (ratio, lower is better)")
+    print(f"{'='*80}")
+
+    # 配置名称行
+    header = f"{'batch':<8}"
+    for br in benchmark_results:
+        name = br['name'][:12]  # 截断名称
+        header += f"{name:<14}"
+    header += "best"
+    print(header)
+    print("-" * 80)
+
+    # 数据行
+    for i, bs in enumerate(batch_sizes):
+        row = f"{bs:<8}"
+        ratios = []
+        for br in benchmark_results:
+            ratio = br['results'][i]['ratio']
+            ratios.append(ratio)
+            # 标记最佳
+            row += f"{ratio:<14.3f}"
+
+        # 找出最佳配置
+        best_idx = ratios.index(min(ratios))
+        row += f"← {benchmark_results[best_idx]['name'][:10]}"
+        print(row)
+
+    # 汇总统计
+    print("-" * 80)
+
+    # 平均 ratio
+    row = f"{'avg':<8}"
+    avg_ratios = []
+    for br in benchmark_results:
+        avg = sum(r['ratio'] for r in br['results']) / len(br['results'])
+        avg_ratios.append(avg)
+        row += f"{avg:<14.3f}"
+    best_idx = avg_ratios.index(min(avg_ratios))
+    row += f"← {benchmark_results[best_idx]['name'][:10]}"
+    print(row)
+
+    # 最佳 ratio
+    row = f"{'best':<8}"
+    for br in benchmark_results:
+        best = min(r['ratio'] for r in br['results'])
+        row += f"{best:<14.3f}"
+    print(row)
+
+    # 最差 ratio
+    row = f"{'worst':<8}"
+    for br in benchmark_results:
+        worst = max(r['ratio'] for r in br['results'])
+        row += f"{worst:<14.3f}"
+    print(row)
+
+    print(f"{'='*80}")
+
+    # ASCII 对比图
+    print(f"\nComparison Chart (avg ratio per config)")
+    print("-" * 60)
+    max_avg = max(avg_ratios)
+    for i, br in enumerate(benchmark_results):
+        bar_len = int(avg_ratios[i] / max_avg * 30)
+        bar = "█" * bar_len
+        marker = " ★ BEST" if avg_ratios[i] == min(avg_ratios) else ""
+        print(f"{br['name'][:20]:<20} {avg_ratios[i]:.3f} {bar}{marker}")
+
+    print(f"{'='*80}\n")
+
+
+if __name__ == "__main__":
+    import sys
+
+    # 命令行参数解析
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == "compare":
+            # python test_return_probs.py compare        # 对比所有
+            # python test_return_probs.py compare -1 -2  # 对比最近两次
+            if len(sys.argv) > 2:
+                indices = [int(x) for x in sys.argv[2:]]
+                compare_benchmarks(*indices)
+            else:
+                compare_benchmarks()
+        elif cmd == "list":
+            # python test_return_probs.py list
+            load_benchmarks()
+        elif cmd == "clear":
+            # python test_return_probs.py clear
+            clear_benchmarks()
+        elif cmd == "acc":
+            # python test_return_probs.py acc [batch_size]
+            bs = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+            test_top_k_top_p_sampling_acc(bs)
+        else:
+            # python test_return_probs.py <config_name>
+            run_batch_benchmark(cmd)
+    else:
+        print("Usage:")
+        print("  python test_return_probs.py <config_name>  # Run benchmark with config name")
+        print("  python test_return_probs.py compare        # Compare all benchmarks")
+        print("  python test_return_probs.py compare -1 -2  # Compare specific indices")
+        print("  python test_return_probs.py list           # List all benchmarks")
+        print("  python test_return_probs.py clear          # Clear benchmark history")
+        print("  python test_return_probs.py acc [bs]       # Run accuracy test")
