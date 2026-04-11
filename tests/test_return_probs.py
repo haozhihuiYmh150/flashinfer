@@ -9,6 +9,31 @@ from flashinfer.sampling import top_k_top_p_sampling_from_probs
 from flashinfer.sampling import top_k_top_p_filter_return_probs
 import numpy as np
 
+"""
+# 第一次修改代码后，编译运行
+python test_return_probs.py baseline
+
+# 修改配置，重新编译运行
+python test_return_probs.py cluster8_pivot4
+
+# 再次修改配置，重新编译运行
+python test_return_probs.py reduce_opt_v1
+
+# 查看所有历史记录
+python test_return_probs.py list
+
+# 对比所有结果
+python test_return_probs.py compare
+
+# 只对比最近两次
+python test_return_probs.py compare -1 -2
+
+# 清空历史记录
+python test_return_probs.py clear
+
+# 精度测试
+python test_return_probs.py acc 16
+"""
 def golden_impl(prob, topk, topp):
     batch_size, vocab_size = prob.shape
     device = prob.device
