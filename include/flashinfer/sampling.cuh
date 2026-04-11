@@ -1276,11 +1276,11 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
         pivots[pv] = low + (pv + 1) * step;
       }
 
-      // Each block computes partial aggregates for all PIVOTS_PER_BLOCK pivots
-      ValueCount<float> partial_aggregates[PIVOTS_PER_BLOCK];
+      // Each thread maintains private accumulators for all pivots
+      ValueCount<float> thread_sums[PIVOTS_PER_BLOCK];
       #pragma unroll
       for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
-        partial_aggregates[pv] = {0, 0};
+        thread_sums[pv] = {0, 0};
       }
 
 #ifdef FLASHINFER_ENABLE_TIMING
@@ -1288,40 +1288,40 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       long long _t0 = clock64();
 #endif
 
-      // Load and compute for this block's chunk only
+      // ===== Phase 1: Load and accumulate to registers (no reduce, no sync) =====
       #pragma unroll 2
       for (uint32_t i = 0; i < ceil_div(my_chunk_elems, BLOCK_THREADS * VEC_SIZE); ++i) {
         const uint32_t local_offset = (i * BLOCK_THREADS + tx) * VEC_SIZE;
         const uint32_t global_idx = my_start + local_offset;
 
-        // ===== Phase 1: Load =====
         probs_vec.fill(0);
         if (global_idx < my_end && local_offset < my_chunk_elems) {
           probs_vec.cast_load(probs + row_idx * d + global_idx);
         }
 
-        // ===== Phase 2: Compute for all pivots =====
+        // Accumulate to thread-local registers for all pivots
         #pragma unroll
         for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
-          ValueCount<float> probs_gt_pivot[VEC_SIZE];
           #pragma unroll
           for (uint32_t j = 0; j < VEC_SIZE; ++j) {
             bool valid = (global_idx + j < my_end) && (local_offset + j < my_chunk_elems);
-            probs_gt_pivot[j] = {
-                (probs_vec[j] > pivots[pv]) ? probs_vec[j] : 0,
-                (probs_vec[j] > pivots[pv] && valid)};
+            if (probs_vec[j] > pivots[pv] && valid) {
+              thread_sums[pv].value += probs_vec[j];
+              thread_sums[pv].count += 1;
+            }
           }
-
-          // ===== Phase 3: BlockReduce for this pivot =====
-          ValueCount<float> block_sum =
-              BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
-                  .Sum<VEC_SIZE>(probs_gt_pivot);
-
-          if (tx == 0) {
-            partial_aggregates[pv] += block_sum;
-          }
-          __syncthreads();
         }
+        // No BlockReduce here, no __syncthreads!
+      }
+
+      // ===== Phase 2: Single reduce at the end for all pivots =====
+      ValueCount<float> partial_aggregates[PIVOTS_PER_BLOCK];
+      #pragma unroll
+      for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+        partial_aggregates[pv] =
+            BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
+                .Sum(thread_sums[pv]);
+        __syncthreads();
       }
 
 #ifdef FLASHINFER_ENABLE_TIMING
@@ -1406,6 +1406,7 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
   } else {
     // =====================================================================
     // Original path for cluster_size == 1: single block reads full vocab
+    // Optimized: accumulate to registers first, then reduce once at the end
     // =====================================================================
     do {
       if (gt_low_count-gt_high_count <= 1 || (high-low) < 1e-7) {
@@ -1414,68 +1415,67 @@ __device__ void GetTopKTopPFilteredProbDevice(DType* probs, DType* filtered_prob
       double step = (high-low) / (cluster_size+1);
       pivot = low + (clusterBlockRank+1) * step;
 
-      ValueCount<float> aggregate_gt_pivot{0, 0};
-#pragma unroll 2
-      for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+      // Thread-local accumulator
+      ValueCount<float> thread_sum{0, 0};
+
 #ifdef FLASHINFER_ENABLE_TIMING
-        __syncthreads();
-        long long _t0 = clock64();
+      __syncthreads();
+      long long _t0 = clock64();
 #endif
 
-        // ===== Phase 1: Load =====
+      // ===== Phase 1: Load and accumulate to registers (no reduce, no sync) =====
+#pragma unroll 2
+      for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
         probs_vec.fill(0);
         if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
           probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
         }
 
-#ifdef FLASHINFER_ENABLE_TIMING
-        // Force data to actually arrive by touching it (prevent load-use latency hiding)
-        #pragma unroll
-        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-          asm volatile("" : "+f"(probs_vec[j]));
-        }
-        __syncthreads();
-        long long _t1 = clock64();
-#endif
-
-        // ===== Phase 2: Compute probs_gt_pivot =====
-        ValueCount<float> probs_gt_pivot[VEC_SIZE];
+        // Accumulate to thread-local register
 #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-          probs_gt_pivot[j] = {
-              (probs_vec[j] > pivot) ? probs_vec[j] : 0,
-              (probs_vec[j] > pivot && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+          bool valid = (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d;
+          if (probs_vec[j] > pivot && valid) {
+            thread_sum.value += probs_vec[j];
+            thread_sum.count += 1;
+          }
         }
-
-#ifdef FLASHINFER_ENABLE_TIMING
-        __syncthreads();
-        long long _t2 = clock64();
-#endif
-
-        // ===== Phase 3: BlockReduce =====
-        aggregate_gt_pivot +=
-            BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
-                .Sum<VEC_SIZE>(probs_gt_pivot);
-        if (tx == 0) {
-          temp_storage.block_aggregate.pair = aggregate_gt_pivot;
-        }
-        __syncthreads();
-        aggregate_gt_pivot = temp_storage.block_aggregate.pair;
-
-#ifdef FLASHINFER_ENABLE_TIMING
-        long long _t3 = clock64();
-        if (tx == 0) {
-          timing_load += (_t1 - _t0);
-          timing_compute += (_t2 - _t1);
-          timing_reduce += (_t3 - _t2);
-        }
-        if (tx == 256) {
-          timing_load_t256 += (_t1 - _t0);
-          timing_compute_t256 += (_t2 - _t1);
-          timing_reduce_t256 += (_t3 - _t2);
-        }
-#endif
+        // No BlockReduce here, no __syncthreads!
       }
+
+#ifdef FLASHINFER_ENABLE_TIMING
+      __syncthreads();
+      long long _t1 = clock64();
+      if (tx == 0) {
+        timing_load += (_t1 - _t0);
+        timing_compute += (_t1 - _t0);
+      }
+      if (tx == 256) {
+        timing_load_t256 += (_t1 - _t0);
+        timing_compute_t256 += (_t1 - _t0);
+      }
+      long long _t2 = clock64();
+#endif
+
+      // ===== Phase 2: Single reduce at the end =====
+      ValueCount<float> aggregate_gt_pivot =
+          BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
+              .Sum(thread_sum);
+      if (tx == 0) {
+        temp_storage.block_aggregate.pair = aggregate_gt_pivot;
+      }
+      __syncthreads();
+      aggregate_gt_pivot = temp_storage.block_aggregate.pair;
+
+#ifdef FLASHINFER_ENABLE_TIMING
+      long long _t3 = clock64();
+      if (tx == 0) {
+        timing_reduce += (_t3 - _t2);
+      }
+      if (tx == 256) {
+        timing_reduce_t256 += (_t3 - _t2);
+      }
+#endif
 
       if (aggregate_gt_pivot.count < k && aggregate_gt_pivot.value < p) {
         high = pivot;
