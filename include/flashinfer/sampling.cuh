@@ -1989,7 +1989,7 @@ cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr, T
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_ALIGNED_VEC_SIZE(
       vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-        constexpr int PIVOTS_PER_BLOCK = 1;
+        constexpr int PIVOTS_PER_BLOCK = 4;
 
         if (batch_size > 16) {
           constexpr uint32_t BLOCK_THREADS = 1024;
