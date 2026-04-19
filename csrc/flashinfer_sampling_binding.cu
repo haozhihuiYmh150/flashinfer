@@ -59,6 +59,12 @@ void top_k_top_p_sampling_from_probs(TensorView probs, TensorView output, Tensor
                                      uint64_t seed_val, Optional<TensorView> maybe_offset_arr,
                                      uint64_t offset_val);
 
+void top_k_top_p_sampling_and_filter(TensorView probs, TensorView filtered_probs, TensorView output,
+                                     Optional<TensorView> maybe_indices,
+                                     Optional<TensorView> maybe_top_k_arr, double top_k_val,
+                                     Optional<TensorView> maybe_top_p_arr, double top_p_val,
+                                     bool deterministic, uint64_t seed_val, uint64_t offset_val);
+
 void top_p_renorm_probs(TensorView probs, TensorView renorm_probs,
                         Optional<TensorView> maybe_top_p_arr, double top_p_val,
                         bool is_deterministic, TensorView workspace);
@@ -92,6 +98,8 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(min_p_sampling_from_probs, min_p_sampling_from_pro
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_p_sampling_from_probs, top_p_sampling_from_probs);
 // Top-k and top-p sampling from probabilities
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_k_top_p_sampling_from_probs, top_k_top_p_sampling_from_probs);
+// Top-k and top-p sampling from probabilities with filtered probs output
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_k_top_p_sampling_and_filter, top_k_top_p_sampling_and_filter);
 // Renormalize probabilities by top-k mask
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_k_renorm_probs, top_k_renorm_probs);
 // Renormalize probabilities by top-p mask

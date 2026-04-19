@@ -462,6 +462,72 @@ def get_sampling_module():
             )
         return torch.empty(batch_size, dtype=out_dtype, device=probs.device)
 
+    # torch library for top_k_top_p_sampling_and_filter
+
+    @register_custom_op("flashinfer::top_k_top_p_sampling_and_filter", mutates_args=())
+    def top_k_top_p_sampling_and_filter(
+        probs: torch.Tensor,
+        indices: Optional[torch.Tensor],
+        maybe_top_k_arr: Optional[torch.Tensor],
+        top_k_val: int,
+        maybe_top_p_arr: Optional[torch.Tensor],
+        top_p_val: float,
+        deterministic: bool,
+        generator: Optional[torch.Generator],
+        seed: Optional[Union[int, torch.Tensor]] = None,
+        offset: Optional[Union[int, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        device = probs.device
+        probs = probs.float()
+        maybe_top_k_arr = maybe_top_k_arr.int() if maybe_top_k_arr is not None else None
+        maybe_top_p_arr = (
+            maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
+        )
+        batch_size = indices.size(0) if indices is not None else probs.size(0)
+        filtered_probs = torch.zeros_like(probs)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+
+        if seed is None or offset is None:
+            seed, offset = get_seed_and_offset(batch_size * 32, generator, device)
+
+        _, seed_val, _, offset_val = _validate_and_convert_seed_offset(
+            seed, offset, device, batch_size
+        )
+
+        module.top_k_top_p_sampling_and_filter(
+            probs,
+            filtered_probs,
+            samples,
+            indices,
+            maybe_top_k_arr,
+            top_k_val,
+            maybe_top_p_arr,
+            top_p_val,
+            deterministic,
+            seed_val,
+            offset_val,
+        )
+        return samples, filtered_probs
+
+    @register_fake_op("flashinfer::top_k_top_p_sampling_and_filter")
+    def _fake_top_k_top_p_sampling_and_filter(
+        probs: torch.Tensor,
+        indices: Optional[torch.Tensor],
+        maybe_top_k_arr: Optional[torch.Tensor],
+        top_k_val: int,
+        maybe_top_p_arr: Optional[torch.Tensor],
+        top_p_val: float,
+        deterministic: bool,
+        generator: Optional[torch.Generator],
+        seed: Optional[Union[int, torch.Tensor]] = None,
+        offset: Optional[Union[int, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = indices.size(0) if indices is not None else probs.size(0)
+        return (
+            torch.empty(batch_size, dtype=torch.int32, device=probs.device),
+            torch.empty_like(probs),
+        )
+
     # torch library for top_p_renorm_probs
 
     @register_custom_op("flashinfer::top_p_renorm_probs", mutates_args=("workspace",))
@@ -1568,6 +1634,102 @@ def top_k_top_p_sampling_from_probs(
         )
     else:
         raise ValueError(f"Invalid filter_apply_order: {filter_apply_order}")
+
+
+@flashinfer_api
+def top_k_top_p_sampling_and_filter(
+    probs: torch.Tensor,
+    top_k: Union[torch.Tensor, int],
+    top_p: Union[torch.Tensor, float],
+    indices: Optional[torch.Tensor] = None,
+    filter_apply_order: str = "joint",
+    deterministic: bool = True,
+    generator: Optional[torch.Generator] = None,
+    check_nan: bool = False,
+    seed: Optional[Union[int, torch.Tensor]] = None,
+    offset: Optional[Union[int, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    r"""Fused GPU kernel for top-k and top-p sampling that also returns filtered probabilities.
+
+    This operator fuses sampling and probability filtering in one pass, which is more efficient
+    than calling them separately. The filtered probabilities can be used for RL training
+    (e.g., computing policy loss in PPO/GRPO).
+
+    Parameters
+    ----------
+    probs: torch.Tensor
+        Probabilities for sampling. Shape should be ``(batch_size, num_classes)``.
+    top_k: Union[torch.Tensor, int]
+        Either a scalar or a tensor of shape ``(batch_size,)``, representing the threshold for top-k sampling.
+    top_p: Union[torch.Tensor, float]
+        Either a scalar or a tensor of shape ``(batch_size,)``, representing the threshold for top-p sampling.
+    indices: Optional[torch.Tensor]
+        Optional indices tensor of shape ``(batch_size,)`` that maps each output to a row in probs.
+    filter_apply_order: str
+        The order of applying top-k and top-p filters. Currently only ``"joint"`` is supported for this API.
+        Default is ``"joint"``.
+    deterministic: bool
+        Whether to use deterministic kernel implementation, default is ``True``.
+    generator: Optional[torch.Generator]
+        A random number generator for the operation.
+    check_nan: bool
+        Whether to check nan in :attr:`probs`, default is ``False``.
+    seed: Optional[Union[int, torch.Tensor]]
+        Random seed value for the sampling operation.
+    offset: Optional[Union[int, torch.Tensor]]
+        Random offset value for the sampling operation.
+
+    Returns
+    -------
+    samples: torch.Tensor
+        Sampled categories, shape ``(batch_size,)``, dtype ``torch.int32``.
+    filtered_probs: torch.Tensor
+        Filtered probability distribution with non-top-k/top-p tokens zeroed out,
+        shape ``(batch_size, num_classes)``.
+
+    Examples
+    --------
+
+    >>> import torch
+    >>> import flashinfer
+    >>> torch.manual_seed(42)
+    >>> batch_size = 4
+    >>> vocab_size = 1000
+    >>> top_k = 50
+    >>> top_p = 0.9
+    >>> probs = torch.softmax(torch.randn(batch_size, vocab_size, device="cuda"), dim=-1)
+    >>> samples, filtered_probs = flashinfer.sampling.top_k_top_p_sampling_and_filter(
+    ...     probs, top_k, top_p
+    ... )
+    >>> samples.shape
+    torch.Size([4])
+    >>> filtered_probs.shape
+    torch.Size([4, 1000])
+
+    Note
+    ----
+    This function uses CUDA Cluster optimization for small batch sizes (<=40) on SM 9.0+ GPUs.
+    For larger batches, performance may be slower than separate sampling due to the additional
+    filtered_probs write overhead.
+    """
+    if filter_apply_order != "joint":
+        raise ValueError(
+            f"top_k_top_p_sampling_and_filter only supports filter_apply_order='joint', "
+            f"got '{filter_apply_order}'"
+        )
+    if check_nan:
+        if torch.any(torch.isnan(probs)):
+            raise ValueError("Input probs contains NaN.")
+    return get_sampling_module().top_k_top_p_sampling_and_filter(
+        probs,
+        indices,
+        *_to_tensor_scalar_tuple(top_k),
+        *_to_tensor_scalar_tuple(top_p),
+        deterministic,
+        generator,
+        seed,
+        offset,
+    )
 
 
 @flashinfer_api
