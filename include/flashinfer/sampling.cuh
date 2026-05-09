@@ -2331,6 +2331,18 @@ cudaError_t TopKTopPSamplingAndFilter(T* probs, IdType* top_k_arr, T* top_p_arr,
         };
 
         cudaError_t status = cudaSuccess;
+
+        // Debug: print register usage
+        {
+          cudaFuncAttributes attr;
+          cudaFuncGetAttributes(&attr, TopKTopPSamplingAndFilterKernel<1024, SCAN_ALGO, REDUCE_ALGO,
+                                                      VEC_SIZE, DETERMINISTIC, T, IdType, 1, 1>);
+          cudaDeviceProp prop;
+          cudaGetDeviceProperties(&prop, 0);
+          printf("[FusedSamplingDebug] regs/thread=%d, regs/block=%d, device regs/block=%d, device regs/SM=%d\n",
+                 attr.numRegs, attr.numRegs * 1024, prop.regsPerBlock, prop.regsPerMultiprocessor);
+        }
+
         if (batch_size <= 8) {
           // Small batch: maximize cluster parallelism
           constexpr uint32_t BLOCK_THREADS = 1024;
