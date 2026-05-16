@@ -78,6 +78,12 @@ void chain_speculative_sampling(TensorView draft_probs, TensorView draft_token_i
                                 Optional<TensorView> maybe_seed_arr, uint64_t seed_val,
                                 Optional<TensorView> maybe_offset_arr, uint64_t offset_val);
 
+void get_top_k_top_p_filtered_probs(TensorView probs, TensorView filtered_probs,
+                                     Optional<TensorView> maybe_indices,
+                                     Optional<TensorView> maybe_top_k_arr, double top_k_val,
+                                     Optional<TensorView> maybe_top_p_arr, double top_p_val,
+                                     bool deterministic);
+
 // Softmax
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(softmax, softmax);
 // Sample from probabilities
@@ -92,6 +98,8 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(min_p_sampling_from_probs, min_p_sampling_from_pro
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_p_sampling_from_probs, top_p_sampling_from_probs);
 // Top-k and top-p sampling from probabilities
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_k_top_p_sampling_from_probs, top_k_top_p_sampling_from_probs);
+// Get filtered probabilities by top-k/top-p threshold
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(get_top_k_top_p_filtered_probs, get_top_k_top_p_filtered_probs);
 // Renormalize probabilities by top-k mask
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_k_renorm_probs, top_k_renorm_probs);
 // Renormalize probabilities by top-p mask

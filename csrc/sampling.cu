@@ -324,6 +324,43 @@ void top_k_top_p_sampling_from_probs(TensorView probs, TensorView output, Tensor
   });
 }
 
+void get_top_k_top_p_filtered_probs(TensorView probs, TensorView filtered_probs,
+                                     Optional<TensorView> maybe_indices,
+                                     Optional<TensorView> maybe_top_k_arr, double top_k_val,
+                                     Optional<TensorView> maybe_top_p_arr, double top_p_val,
+                                     bool deterministic) {
+  CHECK_INPUT(probs);
+  CHECK_INPUT(filtered_probs);
+  CHECK_DEVICE(filtered_probs, probs);
+  CHECK_DIM(2, probs);            // probs: (batch_size, vocab_size)
+  CHECK_DIM(2, filtered_probs);   // filtered_probs: (batch_size, vocab_size)
+  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
+
+  unsigned int batch_size = probs.size(0);
+  unsigned int vocab_size = probs.size(1);
+  check_tensor_param(maybe_top_k_arr, probs);
+  check_tensor_param(maybe_top_p_arr, probs);
+  bool has_top_k_arr = maybe_top_k_arr.has_value();
+  bool has_top_p_arr = maybe_top_p_arr.has_value();
+
+  ffi::CUDADeviceGuard device_guard(probs.device().device_id);
+  auto stream = get_stream(probs.device());
+
+  DISPATCH_DLPACK_IDTYPE_TO_CTYPE(maybe_indices.has_value() ? maybe_indices.value().dtype() : dl_int32, IdType, [&] {
+    cudaError_t status = sampling::GetTopKTopPFilteredProb<float, IdType>(
+        static_cast<float*>(probs.data_ptr()),
+        has_top_k_arr ? static_cast<IdType*>(maybe_top_k_arr.value().data_ptr()) : nullptr,
+        has_top_p_arr ? static_cast<float*>(maybe_top_p_arr.value().data_ptr()) : nullptr,
+        static_cast<float*>(filtered_probs.data_ptr()),
+        maybe_indices.has_value() ? static_cast<IdType*>(maybe_indices.value().data_ptr()) : nullptr,
+        batch_size, top_k_val, top_p_val, vocab_size, deterministic,
+        0, 1, stream);
+    TVM_FFI_ICHECK(status == cudaSuccess)
+        << "GetTopKTopPFilteredProb failed with error code " << cudaGetErrorString(status);
+    return true;
+  });
+}
+
 void chain_speculative_sampling(TensorView draft_probs, TensorView draft_token_ids,
                                 TensorView target_probs, TensorView output_token_ids,
                                 TensorView output_accepted_token_num,
