@@ -16,6 +16,7 @@
 #ifndef FLASHINFER_SAMPLING_CUH_
 #define FLASHINFER_SAMPLING_CUH_
 
+#include <cooperative_groups.h>
 #include <cuda.h>
 #include <curand.h>
 #include <curand_kernel.h>
@@ -37,21 +38,34 @@
 #include "utils.cuh"
 #include "vec_dtypes.cuh"
 
-// Define reduction operators based on CUDA version
-// CUDA 13 (12.9+) deprecated cub::Max/Min in favor of cuda::maximum/minimum
-#if CUDA_VERSION >= 12090
 using MaxReduceOp = cuda::maximum<>;
 using MinReduceOp = cuda::minimum<>;
-#else
-using MaxReduceOp = cub::Max;
-using MinReduceOp = cub::Min;
-#endif
 
 namespace flashinfer {
 
 namespace sampling {
 
 using namespace cub;
+
+// IEEE-754 compliant arithmetic via inline PTX (no .ftz modifier).
+// Under -use_fast_math, the compiler emits .ftz variants that flush subnormal
+// results to zero.  These helpers bypass that for operations where subnormal
+// correctness matters (see #769, #774).
+__device__ __forceinline__ float ieee_mul(float a, float b) {
+  float r;
+  asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+  return r;
+}
+__device__ __forceinline__ float ieee_add(float a, float b) {
+  float r;
+  asm("add.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+  return r;
+}
+__device__ __forceinline__ float ieee_div(float a, float b) {
+  float r;
+  asm("div.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+  return r;
+}
 
 #define DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, ...) \
   if (deterministic) {                                            \
@@ -845,7 +859,7 @@ __global__ void TopKSamplingFromProbKernel(DType* probs, IdType* output, bool* v
   vec_t<float, VEC_SIZE> probs_vec;
   float aggregate;
   float q = 1;
-  double low = 0, high = 1.f;
+  float low = 0, high = 1.f;
   int sampled_id;
   int round = 0;
   do {
@@ -884,8 +898,9 @@ __global__ void TopKSamplingFromProbKernel(DType* probs, IdType* output, bool* v
       }
       sampled_id = temp_storage.last_valid_id;
     }
-    double pivot_0 = probs[row_idx * d + sampled_id];
-    double pivot_1 = (pivot_0 + high) / 2;
+    // IEEE-754 arithmetic (no FTZ) for pivot computation.  See #769 / #774.
+    float pivot_0 = probs[row_idx * d + sampled_id];
+    float pivot_1 = ieee_mul(ieee_add(pivot_0, high), 0.5f);
 
     ValueCount<float> aggregate_gt_pivot_0{0, 0}, aggregate_gt_pivot_1{0, 0};
     ValueCount<float> threadlocal_gt_pivot_0{0, 0}, threadlocal_gt_pivot_1{0, 0};
@@ -977,7 +992,7 @@ __global__ void TopPSamplingFromProbKernel(DType* probs, IdType* output, bool* v
   vec_t<float, VEC_SIZE> probs_vec;
   float aggregate;
   float q = 1;
-  double low = 0, high = 1.f;
+  float low = 0, high = 1.f;
   int sampled_id;
   do {
     temp_storage.sampled_id = d;
@@ -1014,8 +1029,9 @@ __global__ void TopPSamplingFromProbKernel(DType* probs, IdType* output, bool* v
       }
       sampled_id = temp_storage.last_valid_id;
     }
-    double pivot_0 = probs[row_idx * d + sampled_id];
-    double pivot_1 = (pivot_0 + high) / 2;
+    // IEEE-754 arithmetic (no FTZ) for pivot computation.  See #769 / #774.
+    float pivot_0 = probs[row_idx * d + sampled_id];
+    float pivot_1 = ieee_mul(ieee_add(pivot_0, high), 0.5f);
 
     float aggregate_gt_pivot_0 = 0, aggregate_gt_pivot_1 = 0;
     float threadlocal_aggregate_gt_pivot_0 = 0;
@@ -1200,7 +1216,7 @@ __global__ void TopKTopPSamplingFromProbKernel(DType* probs, IdType* top_k_arr, 
   vec_t<float, VEC_SIZE> probs_vec;
   float aggregate;
   float q = 1;
-  double low = 0, high = 1.f;
+  float low = 0, high = 1.f;
   int sampled_id;
   do {
     temp_storage.sampled_id = d;
@@ -1237,8 +1253,9 @@ __global__ void TopKTopPSamplingFromProbKernel(DType* probs, IdType* top_k_arr, 
         return;
       }
     }
-    double pivot_0 = probs[row_idx * d + sampled_id];
-    double pivot_1 = (pivot_0 + high) / 2;
+    // IEEE-754 arithmetic (no FTZ) for pivot computation.  See #769 / #774.
+    float pivot_0 = probs[row_idx * d + sampled_id];
+    float pivot_1 = ieee_mul(ieee_add(pivot_0, high), 0.5f);
 
     ValueCount<float> aggregate_gt_pivot_0{0, 0}, aggregate_gt_pivot_1{0, 0};
     ValueCount<float> threadlocal_aggregate_gt_pivot_0{0, 0};
@@ -1711,7 +1728,7 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
                               RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>>(probs, row_idx, d,
                                                                                   temp_storage);
 
-  double low = 0, high = max_val;
+  float low = 0, high = max_val;
   float min_gt_low, max_le_high;
   float sum_low = 1;
   // f(x) = sum(probs[probs > x]), f(x) is non-increasing
@@ -1722,8 +1739,10 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
   // stopping condition
   // - f(low) >= p, f(min_gt_low) == f(max_le_high) == f(high) < p
   do {
-    double pivot_0 = (high + 2 * low) / 3;
-    double pivot_1 = (2 * high + low) / 3;
+    // Use IEEE-754 arithmetic (no FTZ) to prevent -use_fast_math from flushing
+    // subnormal pivots to zero, which would stall the search (#769, #774).
+    float pivot_0 = ieee_div(ieee_add(high, ieee_mul(2.f, low)), 3.f);
+    float pivot_1 = ieee_div(ieee_add(ieee_mul(2.f, high), low), 3.f);
 
     float aggregate_gt_pivot_0 = 0, aggregate_gt_pivot_1 = 0;
     min_gt_low = high;
@@ -2012,6 +2031,332 @@ cudaError_t ChainSpeculativeSampling(
         })});
     return cudaSuccess;
   });
+}
+
+// =============================================================================
+// Fused TopK-TopP Sampling + Filtered Probabilities
+// Returns both sampled token and filtered probs in a single kernel launch.
+// Supports Cluster (DSM) optimization on SM >= 9.0.
+// =============================================================================
+
+#define PIVOT_CONVERGENCE_THRESHOLD 1e-7
+
+template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM, int PIVOTS_PER_BLOCK>
+struct GetTopKTopPFilteredProbSmemLayout {
+  SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM> temp_storage;
+  double smem_low;
+  double smem_high;
+  float smem_gt_low_count;
+  float smem_gt_high_count;
+  ValueCount<float> smem_pivot_aggregates[PIVOTS_PER_BLOCK > 2 ? PIVOTS_PER_BLOCK : 2];
+};
+
+// Device function: find the filtering threshold via binary search (cluster-aware)
+template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
+          typename DType, typename IdType, int cluster_size = 1, int PIVOTS_PER_BLOCK = 4>
+__device__ void GetTopKTopPFilteredProbDeviceWithSmem(
+    DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
+    IdType* indices, IdType top_k_val, float top_p_val, uint32_t d,
+    GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
+                                     PIVOTS_PER_BLOCK>& smem,
+    double low, double high) {
+  namespace cg = cooperative_groups;
+  auto cluster = cg::this_cluster();
+  unsigned int clusterBlockRank = cluster.block_rank();
+
+  const uint32_t bx = blockIdx.x / cluster_size, tx = threadIdx.x;
+  const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
+  const uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[bx];
+  const float p = top_p_arr == nullptr ? top_p_val : top_p_arr[bx];
+
+  auto& temp_storage = smem.temp_storage;
+  auto& smem_low = smem.smem_low;
+  auto& smem_high = smem.smem_high;
+  auto& smem_gt_low_count = smem.smem_gt_low_count;
+  auto& smem_gt_high_count = smem.smem_gt_high_count;
+  auto& smem_pivot_aggregates = smem.smem_pivot_aggregates;
+
+  vec_t<float, VEC_SIZE> probs_vec;
+  int gt_low_count = d, gt_high_count = 0;
+
+  if constexpr (cluster_size > 1) {
+    const uint32_t raw_chunk_size = ceil_div(d, (uint32_t)cluster_size);
+    const uint32_t chunk_size = ((raw_chunk_size + VEC_SIZE - 1) / VEC_SIZE) * VEC_SIZE;
+    const uint32_t my_start = clusterBlockRank * chunk_size;
+    const uint32_t my_end = min(my_start + chunk_size, d);
+    const uint32_t my_chunk_elems = (my_start < d) ? (my_end - my_start) : 0;
+
+    do {
+      if (gt_low_count - gt_high_count <= 1 || (high - low) < PIVOT_CONVERGENCE_THRESHOLD) break;
+
+      double step = (high - low) / (PIVOTS_PER_BLOCK + 1);
+      double pivots[PIVOTS_PER_BLOCK];
+#pragma unroll
+      for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) pivots[pv] = low + (pv + 1) * step;
+
+      ValueCount<float> thread_sums[PIVOTS_PER_BLOCK];
+#pragma unroll
+      for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) thread_sums[pv] = {0, 0};
+
+#pragma unroll 2
+      for (uint32_t i = 0; i < ceil_div(my_chunk_elems, BLOCK_THREADS * VEC_SIZE); ++i) {
+        const uint32_t local_offset = (i * BLOCK_THREADS + tx) * VEC_SIZE;
+        const uint32_t global_idx = my_start + local_offset;
+        probs_vec.fill(0);
+        if (global_idx < my_end && local_offset < my_chunk_elems)
+          probs_vec.cast_load(probs + row_idx * d + global_idx);
+#pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+#pragma unroll
+          for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+            bool v = (global_idx + j < my_end) && (local_offset + j < my_chunk_elems);
+            if (probs_vec[j] > pivots[pv] && v) {
+              thread_sums[pv].value += probs_vec[j];
+              thread_sums[pv].count += 1;
+            }
+          }
+        }
+      }
+
+      ValueCount<float> partial_aggregates[PIVOTS_PER_BLOCK];
+#pragma unroll
+      for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+        partial_aggregates[pv] =
+            BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
+                .Sum(thread_sums[pv]);
+        __syncthreads();
+      }
+      if (tx == 0) {
+#pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv)
+          smem_pivot_aggregates[pv] = partial_aggregates[pv];
+      }
+      __syncthreads();
+      cluster.sync();
+
+      if (clusterBlockRank == 0) {
+        ValueCount<float> full_aggregates[PIVOTS_PER_BLOCK];
+#pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) full_aggregates[pv] = {0, 0};
+        for (int blk = 0; blk < cluster_size; ++blk) {
+          ValueCount<float>* remote = cluster.map_shared_rank(smem_pivot_aggregates, blk);
+#pragma unroll
+          for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) full_aggregates[pv] += remote[pv];
+        }
+        double old_low = low;
+#pragma unroll
+        for (int pv = 0; pv < PIVOTS_PER_BLOCK; ++pv) {
+          double pivot = old_low + (pv + 1) * step;
+          if (full_aggregates[pv].count < k && full_aggregates[pv].value < p) {
+            high = pivot;
+            gt_high_count = full_aggregates[pv].count;
+            break;
+          } else {
+            low = pivot;
+            gt_low_count = full_aggregates[pv].count;
+          }
+        }
+        if (tx == 0) {
+          smem_low = low;
+          smem_high = high;
+          smem_gt_low_count = gt_low_count;
+          smem_gt_high_count = gt_high_count;
+        }
+        __syncthreads();
+      }
+      cluster.sync();
+      if (clusterBlockRank != 0) {
+        low = *cluster.map_shared_rank(&smem_low, 0);
+        high = *cluster.map_shared_rank(&smem_high, 0);
+        gt_low_count = *cluster.map_shared_rank(&smem_gt_low_count, 0);
+        gt_high_count = *cluster.map_shared_rank(&smem_gt_high_count, 0);
+      }
+    } while (low < high);
+  } else {
+    // cluster_size == 1
+    do {
+      if (gt_low_count - gt_high_count <= 1 || (high - low) < PIVOT_CONVERGENCE_THRESHOLD) break;
+      double pivot = (low + high) / 2;
+      ValueCount<float> thread_sum{0, 0};
+#pragma unroll 2
+      for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+        probs_vec.fill(0);
+        if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+          probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+          bool v = (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d;
+          if (probs_vec[j] > pivot && v) {
+            thread_sum.value += probs_vec[j];
+            thread_sum.count += 1;
+          }
+        }
+      }
+      ValueCount<float> agg =
+          BlockReduce<ValueCount<float>, BLOCK_THREADS>(temp_storage.block_prim.reduce_value_count)
+              .Sum(thread_sum);
+      if (tx == 0) temp_storage.block_aggregate.pair = agg;
+      __syncthreads();
+      agg = temp_storage.block_aggregate.pair;
+      if (agg.count < k && agg.value < p) {
+        high = pivot;
+        gt_high_count = agg.count;
+      } else {
+        low = pivot;
+        gt_low_count = agg.count;
+      }
+    } while (low < high);
+  }
+
+  if (clusterBlockRank != 0) return;
+  __syncthreads();
+
+  // Write filtered probs
+#pragma unroll 2
+  for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+    probs_vec.fill(0);
+    if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+      probs_vec.cast_load(probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+#pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; ++j)
+      probs_vec[j] = (probs_vec[j] >= high) ? probs_vec[j] : 0;
+    if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+      probs_vec.cast_store(filtered_probs + row_idx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE);
+  }
+}
+
+// Standalone kernel: filter probabilities by top-k/top-p threshold
+template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
+          typename DType, typename IdType, int cluster_size = 1, int PIVOTS_PER_BLOCK = 1>
+__global__ void GetTopKTopPFilteredProbKernel(
+    DType* probs, DType* filtered_probs, IdType* top_k_arr, float* top_p_arr,
+    IdType* indices, IdType top_k_val, float top_p_val, uint32_t d,
+    double low_val, double high_val) {
+  extern __shared__ __align__(
+      alignof(GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
+                                               PIVOTS_PER_BLOCK>))
+      uint8_t smem_raw[];
+  auto& smem = *reinterpret_cast<
+      GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
+                                       PIVOTS_PER_BLOCK>*>(smem_raw);
+
+  double low = low_val, high = high_val;
+
+  GetTopKTopPFilteredProbDeviceWithSmem<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM,
+                                       VEC_SIZE, DETERMINISTIC, DType, IdType,
+                                       cluster_size, PIVOTS_PER_BLOCK>(
+      probs, filtered_probs, top_k_arr, top_p_arr, indices,
+      top_k_val, top_p_val, d, smem, low, high);
+}
+
+// Host function: launch standalone filter kernel
+template <typename T, typename IdType>
+cudaError_t GetTopKTopPFilteredProb(T* probs, IdType* top_k_arr, T* top_p_arr,
+                                     T* filtered_probs, IdType* indices,
+                                     uint32_t batch_size, IdType top_k_val, T top_p_val,
+                                     uint32_t d, bool deterministic,
+                                     double low = 0, double high = 1,
+                                     cudaStream_t stream = 0) {
+  const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
+  auto compute_capacity = GetCudaComputeCapability();
+  const bool use_cluster = compute_capacity.first >= 9;
+
+  DISPATCH_ALIGNED_VEC_SIZE(
+      vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+
+        auto launch_kernel = [&](auto kernel, uint32_t smem_size, int cs,
+                                 uint32_t block_threads) -> cudaError_t {
+          cudaLaunchAttribute attribute[1];
+          attribute[0].id = cudaLaunchAttributeClusterDimension;
+          attribute[0].val.clusterDim.x = cs;
+          attribute[0].val.clusterDim.y = 1;
+          attribute[0].val.clusterDim.z = 1;
+
+          cudaLaunchConfig_t config = {0};
+          config.gridDim = batch_size * cs;
+          config.blockDim = block_threads;
+          config.dynamicSmemBytes = smem_size;
+          config.stream = stream;
+          config.numAttrs = 1;
+          config.attrs = attribute;
+
+          cudaError_t status =
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+          if (status != cudaSuccess) return status;
+          status = cudaLaunchKernelEx(&config, kernel, probs, filtered_probs, top_k_arr, top_p_arr,
+                                      indices, top_k_val, top_p_val, d, low, high);
+          return status;
+        };
+
+        auto launch_kernel_no_cluster = [&](auto kernel, uint32_t smem_size,
+                                            uint32_t block_threads) -> cudaError_t {
+          cudaError_t status =
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+          if (status != cudaSuccess) return status;
+          dim3 grid(batch_size);
+          dim3 block(block_threads);
+          void* args[] = {&probs, &filtered_probs, &top_k_arr, &top_p_arr,
+                          &indices, &top_k_val, &top_p_val, &d, &low, &high};
+          status = cudaLaunchKernel((void*)kernel, grid, block, args, smem_size, stream);
+          return status;
+        };
+
+        cudaError_t status = cudaSuccess;
+        constexpr uint32_t BLOCK_THREADS = 1024;
+        constexpr int PIVOTS_PER_BLOCK = 1;
+
+        if (!use_cluster) {
+          constexpr int cs = 1;
+          const uint32_t smem_size = sizeof(
+              GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                               PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                       VEC_SIZE, DETERMINISTIC, T, IdType,
+                                                       cs, PIVOTS_PER_BLOCK>;
+          status = launch_kernel_no_cluster(kernel, smem_size, BLOCK_THREADS);
+        } else if (batch_size <= 8) {
+          constexpr int cs = 8;
+          const uint32_t smem_size = sizeof(
+              GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                               PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                       VEC_SIZE, DETERMINISTIC, T, IdType,
+                                                       cs, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cs, BLOCK_THREADS);
+        } else if (batch_size <= 32) {
+          constexpr int cs = 4;
+          const uint32_t smem_size = sizeof(
+              GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                               PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                       VEC_SIZE, DETERMINISTIC, T, IdType,
+                                                       cs, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cs, BLOCK_THREADS);
+        } else if (batch_size <= 40) {
+          constexpr int cs = 2;
+          const uint32_t smem_size = sizeof(
+              GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                               PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                       VEC_SIZE, DETERMINISTIC, T, IdType,
+                                                       cs, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cs, BLOCK_THREADS);
+        } else {
+          constexpr int cs = 1;
+          const uint32_t smem_size = sizeof(
+              GetTopKTopPFilteredProbSmemLayout<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                               PIVOTS_PER_BLOCK>);
+          auto kernel = GetTopKTopPFilteredProbKernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO,
+                                                       VEC_SIZE, DETERMINISTIC, T, IdType,
+                                                       cs, PIVOTS_PER_BLOCK>;
+          status = launch_kernel(kernel, smem_size, cs, BLOCK_THREADS);
+        }
+        if (status != cudaSuccess) return status;
+      })});
+  return cudaSuccess;
 }
 
 }  // namespace sampling

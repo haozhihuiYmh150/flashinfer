@@ -21,6 +21,20 @@ import torch
 
 from .api_logging import flashinfer_api
 from .jit.sampling import gen_sampling_module
+from .trace.templates.sampling import (
+    chain_speculative_sampling_trace,
+    min_p_sampling_trace,
+    sampling_from_logits_trace,
+    sampling_from_probs_trace,
+    softmax_trace,
+    top_k_mask_logits_trace,
+    top_k_renorm_probs_trace,
+    top_k_sampling_trace,
+    top_k_top_p_sampling_from_logits_trace,
+    top_k_top_p_sampling_trace,
+    top_p_renorm_probs_trace,
+    top_p_sampling_trace,
+)
 from .utils import (
     _get_cache_buf,
     device_support_pdl,
@@ -462,6 +476,50 @@ def get_sampling_module():
             )
         return torch.empty(batch_size, dtype=out_dtype, device=probs.device)
 
+    # torch library for get_top_k_top_p_filtered_probs
+
+    @register_custom_op("flashinfer::get_top_k_top_p_filtered_probs", mutates_args=())
+    def get_top_k_top_p_filtered_probs(
+        probs: torch.Tensor,
+        indices: Optional[torch.Tensor],
+        maybe_top_k_arr: Optional[torch.Tensor],
+        top_k_val: int,
+        maybe_top_p_arr: Optional[torch.Tensor],
+        top_p_val: float,
+        deterministic: bool,
+    ) -> torch.Tensor:
+        device = probs.device
+        probs = probs.float()
+        maybe_top_k_arr = maybe_top_k_arr.int() if maybe_top_k_arr is not None else None
+        maybe_top_p_arr = (
+            maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
+        )
+        filtered_probs = torch.zeros_like(probs)
+
+        module.get_top_k_top_p_filtered_probs(
+            probs,
+            filtered_probs,
+            indices,
+            maybe_top_k_arr,
+            top_k_val,
+            maybe_top_p_arr,
+            top_p_val,
+            deterministic,
+        )
+        return filtered_probs
+
+    @register_fake_op("flashinfer::get_top_k_top_p_filtered_probs")
+    def _fake_get_top_k_top_p_filtered_probs(
+        probs: torch.Tensor,
+        indices: Optional[torch.Tensor],
+        maybe_top_k_arr: Optional[torch.Tensor],
+        top_k_val: int,
+        maybe_top_p_arr: Optional[torch.Tensor],
+        top_p_val: float,
+        deterministic: bool,
+    ) -> torch.Tensor:
+        return torch.empty_like(probs)
+
     # torch library for top_p_renorm_probs
 
     @register_custom_op("flashinfer::top_p_renorm_probs", mutates_args=("workspace",))
@@ -644,6 +702,7 @@ def get_sampling_module():
         top_k_sampling_from_probs=top_k_sampling_from_probs,
         min_p_sampling_from_probs=min_p_sampling_from_probs,
         top_k_top_p_sampling_from_probs=top_k_top_p_sampling_from_probs,
+        get_top_k_top_p_filtered_probs=get_top_k_top_p_filtered_probs,
         top_p_renorm_probs=top_p_renorm_probs,
         top_k_renorm_probs=top_k_renorm_probs,
         top_k_mask_logits=top_k_mask_logits,
@@ -719,7 +778,7 @@ def _validate_and_convert_seed_offset(
     return maybe_seed_arr, seed_val, maybe_offset_arr, offset_val
 
 
-@flashinfer_api
+@flashinfer_api(trace=softmax_trace)
 def softmax(
     logits: torch.Tensor,
     temperature: Optional[Union[torch.Tensor, float]] = None,
@@ -777,7 +836,7 @@ def softmax(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=sampling_from_logits_trace)
 def sampling_from_logits(
     logits: torch.Tensor,
     indices: Optional[torch.Tensor] = None,
@@ -857,7 +916,7 @@ def sampling_from_logits(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=sampling_from_probs_trace)
 def sampling_from_probs(
     probs: torch.Tensor,
     indices: Optional[torch.Tensor] = None,
@@ -950,7 +1009,7 @@ def sampling_from_probs(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=top_p_sampling_trace)
 def top_p_sampling_from_probs(
     probs: torch.Tensor,
     top_p: Union[torch.Tensor, float],
@@ -1062,7 +1121,7 @@ def top_p_sampling_from_probs(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=top_k_sampling_trace)
 def top_k_sampling_from_probs(
     probs: torch.Tensor,
     top_k: Union[torch.Tensor, int],
@@ -1174,7 +1233,7 @@ def top_k_sampling_from_probs(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=min_p_sampling_trace)
 def min_p_sampling_from_probs(
     probs: torch.Tensor,
     min_p: Union[torch.Tensor, float],
@@ -1282,7 +1341,7 @@ def min_p_sampling_from_probs(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=top_k_top_p_sampling_from_logits_trace)
 def top_k_top_p_sampling_from_logits(
     logits: torch.Tensor,
     top_k: Union[torch.Tensor, int],
@@ -1428,7 +1487,7 @@ def top_k_top_p_sampling_from_logits(
         raise ValueError(f"Invalid filter_apply_order: {filter_apply_order}")
 
 
-@flashinfer_api
+@flashinfer_api(trace=top_k_top_p_sampling_trace)
 def top_k_top_p_sampling_from_probs(
     probs: torch.Tensor,
     top_k: Union[torch.Tensor, int],
@@ -1570,7 +1629,98 @@ def top_k_top_p_sampling_from_probs(
         raise ValueError(f"Invalid filter_apply_order: {filter_apply_order}")
 
 
-@flashinfer_api
+def top_k_top_p_sampling_and_filter(
+    probs: torch.Tensor,
+    top_k: Union[torch.Tensor, int],
+    top_p: Union[torch.Tensor, float],
+    indices: Optional[torch.Tensor] = None,
+    deterministic: bool = True,
+    generator: Optional[torch.Generator] = None,
+    seed: Optional[Union[int, torch.Tensor]] = None,
+    offset: Optional[Union[int, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    r"""Top-k and top-p sampling with filtered probability output.
+
+    This operator performs top-k/top-p sampling and also returns the filtered probability
+    distribution where non-top-k/top-p tokens are zeroed out. The filtered probabilities
+    can be used for RL training (e.g., computing policy loss in PPO/GRPO).
+
+    Internally this calls two separate kernels: ``top_k_top_p_sampling_from_probs`` for
+    sampling and ``get_top_k_top_p_filtered_probs`` for filtering. The sampled token is
+    guaranteed to have non-zero probability in the filtered output.
+
+    Parameters
+    ----------
+    probs: torch.Tensor
+        Probabilities, shape ``(batch_size, vocab_size)`` or ``(unique_batch_size, vocab_size)``
+        when indices is provided.
+    top_k: Union[torch.Tensor, int]
+        Scalar or per-request tensor of shape ``(batch_size,)``.
+    top_p: Union[torch.Tensor, float]
+        Scalar or per-request tensor of shape ``(batch_size,)``.
+    indices: Optional[torch.Tensor]
+        Optional mapping from output index to probs row, shape ``(batch_size,)``.
+    deterministic: bool
+        Whether to use deterministic implementation. Default True.
+    generator: Optional[torch.Generator]
+        Random number generator.
+    seed: Optional[Union[int, torch.Tensor]]
+        Optional seed (scalar or 1-D tensor).
+    offset: Optional[Union[int, torch.Tensor]]
+        Optional offset (scalar or 1-D tensor).
+
+    Returns
+    -------
+    samples: torch.Tensor
+        Sampled token indices, shape ``(batch_size,)``.
+    filtered_probs: torch.Tensor
+        Filtered probabilities with non-top-k/top-p tokens zeroed out,
+        shape ``(batch_size, vocab_size)``.
+    """
+    # Phase 1: sampling
+    samples = top_k_top_p_sampling_from_probs(
+        probs,
+        top_k,
+        top_p,
+        indices=indices,
+        deterministic=deterministic,
+        filter_apply_order="joint",
+        generator=generator,
+        seed=seed,
+        offset=offset,
+    )
+
+    # Phase 2: filtering
+    _mod = get_sampling_module()
+    filtered_probs = _mod.get_top_k_top_p_filtered_probs(
+        probs.float(),
+        indices,
+        *_to_tensor_scalar_tuple(top_k),
+        *_to_tensor_scalar_tuple(top_p),
+        deterministic,
+    )
+
+    # Ensure sampled token always has non-zero probability in filtered_probs
+    # When indices is provided, probs is (unique_batch, vocab) but samples is (batch_size,)
+    # We need to gather the sampled token's original prob for each request
+    if indices is not None:
+        row_for_sample = indices  # (batch_size,)
+    else:
+        row_for_sample = torch.arange(samples.shape[0], device=samples.device)
+    sampled_probs = probs.float()[row_for_sample, samples]  # (batch_size,)
+
+    # Write into filtered_probs at the sampled position
+    # filtered_probs has same shape as probs (unique_batch, vocab) when indices is set
+    if indices is not None:
+        # For each sample, write its original prob into the corresponding row of filtered_probs
+        filtered_probs[row_for_sample, samples] = sampled_probs
+    else:
+        filtered_probs.scatter_(1, samples.unsqueeze(1), sampled_probs.unsqueeze(1))
+
+    return samples, filtered_probs
+
+
+@flashinfer_api(trace=top_p_renorm_probs_trace)
 def top_p_renorm_probs(
     probs: torch.Tensor,
     top_p: Union[torch.Tensor, float],
@@ -1659,7 +1809,7 @@ def top_p_renorm_probs(
 top_p_renorm_prob = top_p_renorm_probs
 
 
-@flashinfer_api
+@flashinfer_api(trace=top_k_renorm_probs_trace)
 def top_k_renorm_probs(
     probs: torch.Tensor,
     top_k: Union[torch.Tensor, int],
@@ -1736,7 +1886,7 @@ def top_k_renorm_probs(
 top_k_renorm_prob = top_k_renorm_probs
 
 
-@flashinfer_api
+@flashinfer_api(trace=top_k_mask_logits_trace)
 def top_k_mask_logits(
     logits: torch.Tensor, top_k: Union[torch.Tensor, int]
 ) -> torch.Tensor:
@@ -1808,7 +1958,7 @@ def top_k_mask_logits(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=chain_speculative_sampling_trace)
 def chain_speculative_sampling(
     draft_probs,
     draft_token_ids,

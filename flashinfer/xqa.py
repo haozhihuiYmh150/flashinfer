@@ -20,6 +20,7 @@ from typing import Optional, Union
 import torch
 
 from .api_logging import flashinfer_api
+from .trace.templates.page import xqa_mla_trace, xqa_trace
 from .jit.xqa import gen_xqa_module, gen_xqa_module_mla
 from .jit.utils import filename_safe_dtype_map
 from .utils import (
@@ -150,13 +151,11 @@ def get_xqa_module(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=xqa_trace)
 def xqa(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    k_sf_cache: Optional[torch.Tensor],
-    v_sf_cache: Optional[torch.Tensor],
     page_table: torch.Tensor,
     seq_lens: torch.Tensor,
     output: torch.Tensor,
@@ -174,6 +173,9 @@ def xqa(
     rcp_out_scale: float = 1.0,
     q_seq_len: int = 1,
     mask: Optional[torch.Tensor] = None,
+    *,
+    k_sf_cache: Optional[torch.Tensor] = None,
+    v_sf_cache: Optional[torch.Tensor] = None,
 ) -> None:
     r"""Apply attention with paged KV cache using XQA kernel.
     Parameters
@@ -441,7 +443,7 @@ def get_xqa_module_mla(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=xqa_mla_trace)
 def xqa_mla(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -516,9 +518,15 @@ def xqa_mla(
     # Infer parameters from tensors
     batch_size = q.shape[0]
     head_dim = q.shape[-1]
+    num_q_heads = q.shape[-2]
 
-    # Calculate head_group_ratio
-    head_group_ratio = 128
+    # Calculate head_group_ratio (MLA has 1 KV head, so ratio = num_q_heads)
+    head_group_ratio = num_q_heads
+    if head_group_ratio != 128:
+        raise ValueError(
+            f"XQA MLA only supports 128 query heads (head_group_ratio=128), "
+            f"got {num_q_heads} query heads"
+        )
 
     # Calculate max_seq_len from page_table and page_size
     num_pages_per_seq = page_table.shape[-1]
